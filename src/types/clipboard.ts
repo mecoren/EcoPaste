@@ -106,6 +106,11 @@ export type ClipboardItemSort =
 
 export type ClipboardGroup = "all" | "text" | "image" | "files" | "favorite";
 
+/**
+ * 「无来源应用」筛选的哨兵值，与 Rust `db::items::SOURCE_APP_NONE` 保持一致。
+ */
+export const SOURCE_APP_NONE = "__none__";
+
 export type ClipboardRange = "all" | "favorite";
 
 export type ClipboardCategory = ClipboardKind;
@@ -135,6 +140,8 @@ export interface ClipboardItemQuery {
   pinned?: boolean;
   /** 列表顶部 Tab；Rust 侧翻译成 kind / favorite，前端不再手动映射。 */
   group?: ClipboardGroup;
+  /** 来源应用 id；`SOURCE_APP_NONE` 表示仅看无来源的条目。 */
+  sourceAppId?: string;
   keyword?: string;
   sort?: ClipboardItemSort;
   limit?: number;

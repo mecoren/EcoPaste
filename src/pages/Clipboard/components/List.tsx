@@ -107,7 +107,7 @@ const List: FC = () => {
 
   const snapshot = useSnapshot(clipboardViewState);
   const settings = useSnapshot(settingsState);
-  const { category, keyword, groupId, range } = snapshot;
+  const { category, keyword, groupId, range, sourceAppId } = snapshot;
   const autoPaste = settings.clipboard.content.autoPaste;
   const middleClick = settings.clipboard.content.middleClick;
   const display = settings.clipboard.display;
@@ -141,6 +141,7 @@ const List: FC = () => {
     keyword,
     kind: category ?? void 0,
     sort,
+    sourceAppId: sourceAppId ?? void 0,
   });
   const topItemCount = countLeadingPinnedItems(getItem);
   const {

@@ -12,6 +12,10 @@ const SELECT_ITEM: &str = "SELECT id, kind, sub_kind, group_id, source_app_id, c
      content_hash, search_text, summary, file_types, size, width, height, use_count, is_favorite, is_pinned, \
      is_sensitive, platform, note, created_at, updated_at FROM clipboard_items";
 
+/// 「无来源应用」筛选的哨兵值：来源应用 id 不会以 `__` 开头（macOS bundle id
+/// 反向 DNS、Windows 绝对路径），用它区分「筛无来源条目」与「不筛」。
+pub const SOURCE_APP_NONE: &str = "__none__";
+
 /// 列表/单条刷新场景的精简 SELECT：text 类型条目的 `content` 与 `search_text` 一律置空，
 /// 由前端用 `summary` 渲染。HTML/RTF/长纯文本可能很大（用户复制整段文档），
 /// 整段过 IPC + 进 DOM 是这条链路最昂贵的一环；image/files 的 content 是
@@ -549,6 +553,14 @@ fn push_filter_clauses(
         qb.push(" AND clipboard_items.group_id = ")
             .push_bind(group_id.clone());
     }
+    if let Some(source_app_id) = &q.source_app_id {
+        if source_app_id == SOURCE_APP_NONE {
+            qb.push(" AND clipboard_items.source_app_id IS NULL");
+        } else {
+            qb.push(" AND clipboard_items.source_app_id = ")
+                .push_bind(source_app_id.clone());
+        }
+    }
     if let Some(favorite) = effective_favorite {
         qb.push(" AND clipboard_items.is_favorite = ")
             .push_bind(favorite);
@@ -562,8 +574,9 @@ fn push_filter_clauses(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::apps::upsert_app;
     use crate::db::groups::insert_group;
-    use crate::db::models::{ClipboardGroup, ClipboardKind, Platform};
+    use crate::db::models::{ClipboardApp, ClipboardGroup, ClipboardKind, Platform};
     use crate::db::test_support::memory_pool;
     use chrono::DateTime;
 
@@ -789,6 +802,45 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(ids(&query_items(&pool, &q).await.unwrap()), ["grouped"]);
+    }
+
+    #[tokio::test]
+    async fn query_filters_by_source_app() {
+        let pool = memory_pool().await;
+        let app = ClipboardApp {
+            id: "app.example".to_owned(),
+            name: "Example".to_owned(),
+            icon_file: None,
+            platform: Platform::Macos,
+            created_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            updated_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+        };
+        upsert_app(&pool, &app).await.unwrap();
+
+        let mut from_app = sample_item("from_app");
+        from_app.source_app_id = Some("app.example".to_owned());
+        insert_item(&pool, &from_app).await.unwrap();
+        insert_item(&pool, &sample_item("no_source")).await.unwrap();
+
+        let q = ClipboardItemQuery {
+            source_app_id: Some("app.example".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(ids(&query_items(&pool, &q).await.unwrap()), ["from_app"]);
+
+        let none_q = ClipboardItemQuery {
+            source_app_id: Some(SOURCE_APP_NONE.to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(
+            ids(&query_items(&pool, &none_q).await.unwrap()),
+            ["no_source"]
+        );
+
+        let all = query_items(&pool, &ClipboardItemQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(ids(&all), ["from_app", "no_source"]);
     }
 
     #[tokio::test]

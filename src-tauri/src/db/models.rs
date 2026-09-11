@@ -219,6 +219,8 @@ pub struct ClipboardItemQuery {
     /// 列表顶部 Tab 过滤（前端只需传这一个；Rust 侧翻译成 kind / favorite）。
     /// 显式设置时覆盖 `kind` / `favorite`；为 None 时走显式字段（保留给单测）。
     pub group: Option<ClipboardGroupFilter>,
+    /// 来源应用过滤（应用筛选下拉选中项的 id）；`Some("__none__")` 表示仅看无来源的条目。
+    pub source_app_id: Option<String>,
     pub keyword: Option<String>,
     pub sort: ClipboardItemSort,
     pub limit: i64,
@@ -244,6 +246,7 @@ impl Default for ClipboardItemQuery {
             favorite: None,
             pinned: None,
             group: None,
+            source_app_id: None,
             keyword: None,
             sort: ClipboardItemSort::UpdatedAt,
             limit: 20,

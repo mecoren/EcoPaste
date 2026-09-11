@@ -1,9 +1,14 @@
 import { useMount } from "ahooks";
+import { Input, type InputRef } from "antd";
 import type { TFunction } from "i18next";
 import type {
+  ChangeEvent,
+  CompositionEvent,
   Dispatch,
   FC,
   MouseEvent,
+  KeyboardEvent as ReactKeyboardEvent,
+  ReactNode,
   RefObject,
   SetStateAction,
 } from "react";
@@ -17,22 +22,28 @@ import {
   openPreferenceWithHighlight,
   updateClipboardGroup,
 } from "@/commands";
+import AssetImage from "@/components/AssetImage";
 import ClipboardGroupIcon from "@/components/ClipboardGroupIcon";
 import ClipboardGroupModal from "@/components/ClipboardGroupModal";
 import Dropdown, { type DropdownMenuItems } from "@/components/Dropdown";
 import KeyHint from "@/components/KeyHint";
+import ScrollArea from "@/components/ScrollArea";
 import Tooltip from "@/components/Tooltip";
 import { TAURI_EVENT } from "@/constants/events";
+import { prepareClipboardWindowEditableFocus } from "@/hooks/useClipboardWindowEditableFocus";
 import { useKeyboardEvent } from "@/hooks/useKeyboardEvent";
 import { useTauriListen } from "@/hooks/useTauriListen";
 import { clipboardViewState } from "@/stores/clipboardView";
+import { preloadSourceApps, sourceAppsState } from "@/stores/sourceApps";
 import type {
+  ClipboardApp,
   ClipboardCategory,
   ClipboardGroupIcon as ClipboardGroupIconValue,
   ClipboardGroupInput,
   ClipboardGroupRecord,
   ClipboardRange,
 } from "@/types/clipboard";
+import { SOURCE_APP_NONE } from "@/types/clipboard";
 import { cn } from "@/utils/cn";
 import { getModalApi } from "@/utils/feedback";
 
@@ -51,6 +62,23 @@ interface CategoryGroupOption {
   labelKey: string;
   value: ClipboardCategory;
   icon: ClipboardGroupIconValue;
+}
+
+interface SourceAppRowProps {
+  /** 键盘导航激活项：渲染高亮并挂 ref 供滚动到可视区。 */
+  active: boolean;
+  icon?: ReactNode;
+  itemRef?: RefObject<HTMLButtonElement | null>;
+  onClick: () => void;
+  selected: boolean;
+  title: string;
+}
+
+interface SourceAppPopupProps {
+  apps: readonly ClipboardApp[];
+  onClose: () => void;
+  onToggleAppFilter: (appId: string) => void;
+  selectedAppId: string | null;
 }
 
 interface OverflowGroupMenuLabelProps {
@@ -104,15 +132,26 @@ const GROUP_BUTTON_GAP = 4;
 const GROUP_SEPARATOR_MARGIN = 4;
 
 /**
+ * 来源应用弹层对齐策略：小屏窗口（360px）下默认 bottomLeft 会让 224px 宽的弹层
+ * 右溢视口；开启 shiftX 让 rc-align 把右溢平移回可视区，4px 为按钮贴近边界的保护值。
+ */
+const SOURCE_APP_POPUP_ALIGN = {
+  overflow: { adjustX: true, adjustY: true, shiftX: 4, shiftY: true },
+} as const satisfies Record<string, unknown>;
+
+/**
  * Header 下方的分组筛选栏：内置类型分组 + 自定义分组入口。
  */
 const Group: FC = () => {
   const { t } = useTranslation(["clipboard", "common"]);
-  const { category, groupId, range } = useSnapshot(clipboardViewState);
+  const { category, groupId, range, sourceAppId } =
+    useSnapshot(clipboardViewState);
+  const { apps: sourceApps } = useSnapshot(sourceAppsState);
 
   const [customGroups, setCustomGroups] = useState<ClipboardGroupRecord[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [modalMode, setModalMode] = useState<GroupModalMode>("create");
+  const [sourceAppPopupOpen, setSourceAppPopupOpen] = useState(false);
   const [visibleCustomGroupCount, setVisibleCustomGroupCount] = useState(
     Number.POSITIVE_INFINITY,
   );
@@ -158,7 +197,14 @@ const Group: FC = () => {
    */
   useMount(() => {
     void loadGroups();
+    void preloadSourceApps();
   });
+
+  /** 当前选中的来源应用记录（哨兵值除外时用于按钮展示）。 */
+  const selectedSourceApp =
+    sourceApps.find((app) => {
+      return app.id === sourceAppId;
+    }) ?? null;
 
   /**
    * 其他窗口或命令修改分组后刷新本地列表。
@@ -215,6 +261,29 @@ const Group: FC = () => {
    */
   const toggleCustomGroup = (id: string) => {
     clipboardViewState.groupId = clipboardViewState.groupId === id ? null : id;
+  };
+
+  /**
+   * 切换来源应用筛选；再次点击当前应用时取消。
+   */
+  const handleSourceAppToggleFilter = (appId: string) => {
+    clipboardViewState.sourceAppId =
+      clipboardViewState.sourceAppId === appId ? null : appId;
+  };
+
+  /**
+   * 来源应用下拉开合受控：点击外部 / 选中行后由这里统一收口关闭，
+   * 关闭即销毁弹层（destroyOnHidden），搜索词与高亮自然重置。
+   */
+  const handleSourceAppOpenChange = (open: boolean) => {
+    setSourceAppPopupOpen(open);
+  };
+
+  /**
+   * 选中行后关闭弹层，恢复背景列表的正常键盘语义。
+   */
+  const handleSourceAppClose = () => {
+    setSourceAppPopupOpen(false);
   };
 
   /**
@@ -589,6 +658,60 @@ const Group: FC = () => {
   };
 
   /**
+   * 渲染来源应用筛选按钮 + 可搜索的应用下拉菜单。
+   */
+  const renderSourceAppButton = () => {
+    const selectedApp =
+      sourceAppId === SOURCE_APP_NONE ? void 0 : selectedSourceApp;
+    const tooltipTitle =
+      sourceAppId === SOURCE_APP_NONE
+        ? t("clipboard:groups.sourceAppNone")
+        : (selectedApp?.name ?? t("clipboard:groups.sourceApp"));
+
+    const renderSourceAppPopup = () => {
+      return (
+        <SourceAppPopup
+          apps={sourceApps}
+          onClose={handleSourceAppClose}
+          onToggleAppFilter={handleSourceAppToggleFilter}
+          selectedAppId={sourceAppId}
+        />
+      );
+    };
+
+    return (
+      <Dropdown
+        align={SOURCE_APP_POPUP_ALIGN}
+        destroyOnHidden
+        onOpenChange={handleSourceAppOpenChange}
+        open={sourceAppPopupOpen}
+        popupRender={renderSourceAppPopup}
+        tooltip={tooltipTitle}
+        trigger={["click"]}
+      >
+        <button
+          className={cn(GROUP_ICON_BUTTON_CLASS, {
+            "bg-ant-primary text-ant-light-solid": sourceAppId !== null,
+            "text-ant-secondary hover:bg-ant-fill-tertiary":
+              sourceAppId === null,
+          })}
+          type="button"
+        >
+          {selectedApp?.iconPath ? (
+            <AssetImage
+              alt={selectedApp.name}
+              className="size-4 rounded-0.5"
+              src={selectedApp.iconPath}
+            />
+          ) : (
+            <i aria-hidden className="i-lucide:app-window text-sm!" />
+          )}
+        </button>
+      </Dropdown>
+    );
+  };
+
+  /**
    * 渲染单个筛选按钮。
    */
   const renderFilterButton = (options: {
@@ -635,6 +758,7 @@ const Group: FC = () => {
         {RANGE_GROUP_OPTIONS.map(renderRangeButton)}
         <GroupSeparator />
         {CATEGORY_GROUP_OPTIONS.map(renderCategoryButton)}
+        {renderSourceAppButton()}
         <GroupSeparator separatorRef={customGroupAnchorRef} />
 
         {inlineCustomGroups.length > 0 && (
@@ -701,6 +825,241 @@ const GroupSeparator: FC<GroupSeparatorProps> = (props) => {
       className="mx-1 h-4 w-px shrink-0 bg-ant-split"
       ref={separatorRef}
     />
+  );
+};
+
+/**
+ * 来源应用下拉弹层：非受控搜索框（IME 组合期不回灌）+ 自绘行列表。
+ * 弹层随 Dropdown 打开重新挂载，搜索词与键盘高亮自然重置，无需手动清理。
+ * Windows 剪贴板窗口默认不可聚焦：挂载后先恢复窗口可聚焦再聚焦搜索框，
+ * 顺序颠倒会让 IME 关联到未激活窗口，拼音组合输入卡死。
+ */
+const SourceAppPopup: FC<SourceAppPopupProps> = (props) => {
+  const { apps, onClose, onToggleAppFilter, selectedAppId } = props;
+  const { t } = useTranslation("clipboard");
+
+  const inputRef = useRef<InputRef>(null);
+  const composingRef = useRef(false);
+  const activeItemRef = useRef<HTMLButtonElement | null>(null);
+  const [keyword, setKeyword] = useState("");
+  const [activeIndex, setActiveIndex] = useState(0);
+
+  const query = keyword.trim().toLocaleLowerCase();
+  const filteredApps = apps.filter((app) => {
+    return app.name.toLocaleLowerCase().includes(query);
+  });
+  // 键盘导航顺序即行渲染顺序：无来源哨兵仅在未搜索时出现。
+  const activeKeys = [
+    ...(query === "" ? [SOURCE_APP_NONE] : []),
+    ...filteredApps.map((app) => {
+      return app.id;
+    }),
+  ];
+
+  /**
+   * 挂载即聚焦：先让 Rust 恢复剪贴板窗口可聚焦，再聚焦搜索框。
+   */
+  useMount(() => {
+    const focusInput = async () => {
+      await prepareClipboardWindowEditableFocus();
+      inputRef.current?.focus();
+    };
+
+    void focusInput();
+  });
+
+  /**
+   * 键盘高亮变化后滚动到可视区，长列表导航时不脱离视野。
+   */
+  // biome-ignore lint/correctness/useExhaustiveDependencies: ref 内容由 activeIndex 变化后的 render 更新，需以 activeIndex 为触发器
+  useEffect(() => {
+    activeItemRef.current?.scrollIntoView({ block: "nearest" });
+  }, [activeIndex]);
+
+  /**
+   * 键盘导航：↑/↓ 在行间循环移动高亮，Enter 选中当前项，Escape 只关弹层。
+   * 可打印字符不拦截，焦点始终在搜索框，输入自然落入搜索词并过滤行。
+   * 全部按键阻止冒泡：背景列表的全局键盘语义（Enter 粘贴、方向键移动选中、
+   * ESC 逐层退出）在弹层打开期间不应触发。
+   */
+  const handleKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.nativeEvent.isComposing) return;
+
+    if (activeKeys.length === 0) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        onClose();
+      }
+
+      return;
+    }
+
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      event.stopPropagation();
+
+      const delta = event.key === "ArrowDown" ? 1 : -1;
+      setActiveIndex((current) => {
+        return (current + delta + activeKeys.length) % activeKeys.length;
+      });
+
+      return;
+    }
+
+    if (event.key === "Enter") {
+      event.preventDefault();
+      event.stopPropagation();
+
+      const key = activeKeys[activeIndex];
+      if (key === void 0) return;
+
+      onToggleAppFilter(key);
+      onClose();
+
+      return;
+    }
+
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+    }
+  };
+
+  /**
+   * IME 组合输入开始：暂停搜索词更新，避免拼音中间态污染过滤。
+   */
+  const handleCompositionStart = () => {
+    composingRef.current = true;
+  };
+
+  /**
+   * IME 组合输入结束：解除暂停并补发一次变更。
+   */
+  const handleCompositionEnd = (event: CompositionEvent<HTMLInputElement>) => {
+    composingRef.current = false;
+    setKeyword(event.currentTarget.value);
+    setActiveIndex(0);
+  };
+
+  /**
+   * 搜索词变化；组合输入期间不更新；搜索词变化后键盘高亮回到首行。
+   */
+  const handleChange = (event: ChangeEvent<HTMLInputElement>) => {
+    if (composingRef.current) return;
+
+    setKeyword(event.target.value);
+    setActiveIndex(0);
+  };
+
+  /**
+   * 点击行切换筛选后关闭弹层，恢复背景列表的正常键盘语义。
+   */
+  const renderRow = (options: {
+    active: boolean;
+    icon?: ReactNode;
+    key: string;
+    title: string;
+  }) => {
+    const { active, icon, key, title } = options;
+
+    const handleClick = () => {
+      onToggleAppFilter(key);
+      onClose();
+    };
+
+    return (
+      <SourceAppRow
+        active={active}
+        icon={icon}
+        itemRef={active ? activeItemRef : void 0}
+        key={key}
+        onClick={handleClick}
+        selected={selectedAppId === key}
+        title={title}
+      />
+    );
+  };
+
+  const listContent =
+    activeKeys.length === 0 ? (
+      <div className="py-1.5 text-center text-ant-secondary text-sm">
+        {t("groups.sourceAppEmpty")}
+      </div>
+    ) : (
+      <ScrollArea
+        className="max-h-64"
+        contentClassName="flex flex-col gap-0.5 py-0.5"
+      >
+        {query === "" &&
+          renderRow({
+            active: activeIndex === 0,
+            key: SOURCE_APP_NONE,
+            title: t("groups.sourceAppNone"),
+          })}
+
+        {filteredApps.map((app, index) => {
+          const itemIndex = index + (query === "" ? 1 : 0);
+
+          return renderRow({
+            active: activeIndex === itemIndex,
+            icon: (
+              <AssetImage
+                alt={app.name}
+                className="size-4 rounded-0.5"
+                src={app.iconPath}
+              />
+            ),
+            key: app.id,
+            title: app.name,
+          });
+        })}
+      </ScrollArea>
+    );
+
+  return (
+    <div className="w-56 max-w-[calc(100vw-2rem)] rounded-2 border border-ant-border-secondary bg-ant-elevated p-1 shadow-lg">
+      <Input
+        allowClear
+        onChange={handleChange}
+        onCompositionEnd={handleCompositionEnd}
+        onCompositionStart={handleCompositionStart}
+        onKeyDown={handleKeyDown}
+        placeholder={t("groups.sourceAppSearchPlaceholder")}
+        prefix={<i aria-hidden className="i-lucide:search" />}
+        ref={inputRef}
+        size="small"
+        spellCheck={false}
+      />
+
+      {listContent}
+    </div>
+  );
+};
+
+/**
+ * 来源应用下拉行：图标（无则省略）+ 名称；键盘激活态高亮，选中态展示勾选。
+ */
+const SourceAppRow: FC<SourceAppRowProps> = (props) => {
+  const { active, icon, itemRef, onClick, selected, title } = props;
+
+  return (
+    <button
+      className={cn(
+        "flex w-full min-w-0 cursor-pointer items-center gap-2 rounded-1 border-0 bg-transparent px-1.5 py-1 text-left text-inherit transition-colors",
+        active ? "bg-ant-fill-tertiary" : "hover:bg-ant-fill-tertiary",
+      )}
+      onClick={onClick}
+      ref={itemRef}
+      type="button"
+    >
+      {icon}
+      <span className="min-w-0 flex-1 truncate">{title}</span>
+      {selected ? (
+        <i aria-hidden className="i-lucide:check shrink-0 text-sm!" />
+      ) : null}
+    </button>
   );
 };
 

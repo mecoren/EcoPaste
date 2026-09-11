@@ -46,6 +46,10 @@
     "name": "Name",
     "namePlaceholder": "Enter group name",
     "removeIcon": "Remove custom icon",
+    "sourceApp": "Filter by app",
+    "sourceAppEmpty": "No matching apps",
+    "sourceAppNone": "No source app",
+    "sourceAppSearchPlaceholder": "Search apps",
     "text": "Text",
     "uploadSvg": "Upload SVG",
     "useCustomIcon": "Use custom SVG"
