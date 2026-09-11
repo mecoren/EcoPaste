@@ -62,16 +62,19 @@ fn ctrl_shortcut_key(vk: u32) -> Option<String> {
     }
 }
 
-/// 可直接落入搜索框的字符键（数字 / 字母 / OEM 符号）。
+/// 可直接落入搜索框的字符键（数字 / 字母 / OEM 符号）与 Backspace（删搜索词）。
 /// 不含 VK_SPACE（预览键）与修饰键；组合键（Ctrl/Alt 按下）由调用方排除。
+/// Backspace 与字母一视同仁：窗口可见但未聚焦时同样入队回放到搜索框，
+/// 搜索词为空时删除是无害空操作，语义与「打字即搜索」保持一致。
 fn typeahead_key(vk: u32) -> bool {
     matches!(vk as i32,
-        0x30..=0x39       // 数字主行
-        | 0x41..=0x5A     // 字母
-        | 0xBA..=0xBF     // ;=,-./`
-        | 0xC0            // `
-        | 0xDB..=0xDF     // [\]'
-        | 0xE2,           // OEM 102（部分欧洲布局）
+        VK_BACK         // 删搜索词
+        | 0x30..=0x39   // 数字主行
+        | 0x41..=0x5A   // 字母
+        | 0xBA..=0xBF   // ;=,-./`
+        | 0xC0          // `
+        | 0xDB..=0xDF   // [\]'
+        | 0xE2,         // OEM 102（部分欧洲布局）
     )
 }
 
@@ -448,6 +451,12 @@ mod tests {
     }
 
     #[test]
+    fn typeahead_key_accepts_backspace_for_search_editing() {
+        // Backspace 与字符键一视同仁入队回放；空搜索词时删除是无害空操作。
+        assert!(typeahead_key(VK_BACK as u32));
+    }
+
+    #[test]
     fn typeahead_key_rejects_navigation_and_modifier_keys() {
         // Space 是预览专用键，不进入搜索框。
         assert!(!typeahead_key(VK_SPACE as u32));
@@ -457,7 +466,6 @@ mod tests {
         assert!(!typeahead_key(VK_LEFT as u32));
         assert!(!typeahead_key(VK_RIGHT as u32));
         assert!(!typeahead_key(VK_RETURN as u32));
-        assert!(!typeahead_key(VK_BACK as u32));
         assert!(!typeahead_key(VK_TAB as u32));
         // 修饰键不纳入（组合键路径由调用方排除）。
         assert!(!typeahead_key(VK_CONTROL as u32));

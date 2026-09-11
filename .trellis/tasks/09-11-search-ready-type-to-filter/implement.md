@@ -85,3 +85,21 @@
 - S2 钩子分支去掉即恢复 Windows 透传（其余步骤无害共存）。
 - S8 store 收口如出问题可回退为 Header 本地防抖（保留 focusout 移除）。
 - 整体：git 单 commit，revert 即全量回退。
+
+## S12 边界修复：方向键浏览后 Backspace 直接删搜索词
+
+实测 S11 发现：输入后按 ↑↓ 浏览列表（handoff blur 搜索框），再按 Backspace 无法删除搜索词，必须重新打字焦点才回来。根因与修复：
+
+- [x] 根因 1：`useSearchTypeahead.ts` 的 `shouldSteerToSearch` 只放行 `event.key.length === 1` 单字符键，Backspace 不在内 → 守卫扩展为「单字符或 Backspace」，无条件放行（不按 store keyword 判断——它带 200ms 防抖晚于输入框真实值，按它判断会丢「打字后立刻方向键再退格」的首个退格；空词时聚焦空输入框是无害空操作）。
+- [x] 根因 2：Rust `typeahead_key` 明确排除 VK_BACK → 窗口未聚焦时 Backspace 透传给用户原前台应用。纳入 VK_BACK 与字符键一视同仁入队回放，同步修正表驱动单测（rejection 列表移除 VK_BACK，新增 acceptance 单测）。
+- [x] 根因 3：真实 keydown 路径 `focusSearch` 先 `await prepareClipboardWindowEditableFocus()`（Windows IPC）再聚焦——能收到真实浏览器 keydown 就说明窗口已持有键盘焦点，editing 命令是多余的，且 IPC 往返期间当前按键默认动作已派发，首字符会丢。改为同步聚焦；`prepare` 仅保留在 Rust 钩子路径（该路径窗口确实未聚焦，需要 editing 切可聚焦）。
+- [x] 连带对齐：Rust 钩子路径 `handleTyping` 补 `hasOpenDialog()` 守卫（与真实 keydown 路径一致）——弹窗打开时不 ack，Rust 回放 150ms 超时后丢弃队列，避免字符落进弹窗背后的搜索框。
+
+验证：`pnpm tsc`、`pnpm lint`、`cargo fmt`、`cargo clippy -- -D warnings`、`cargo test`（181 通过，含 3 个 typeahead 单测）全部通过。
+
+手动验证补充项（并入 S11 清单）：
+
+- [ ] 输入搜索词 → ↑↓ 浏览 → Backspace 直接删词（无需重新打字），连按删空后 Backspace 无异常（不删列表项）
+- [ ] Windows 窗口未聚焦（刚唤起、未点击）→ ↑↓ → Backspace：字符不泄漏到原前台应用
+- [ ] 打字后 200ms 内立刻 ↑↓ → Backspace：首个退格生效（防抖窗口场景）
+- [ ] 备注弹窗打开时打字/退格 → 落入弹窗输入框，不抢焦点
