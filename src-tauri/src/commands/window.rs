@@ -114,6 +114,14 @@ pub async fn set_clipboard_window_editing(app: AppHandle, editing: bool) -> Resu
     window::set_clipboard_window_editing(&app, editing)
 }
 
+/// 前端搜索框聚焦完成后回报，解锁 Rust 回放被吞的可打印字符。
+/// macOS 无低级钩子，恒为 no-op success。
+#[tauri::command]
+pub async fn search_typing_ack() {
+    #[cfg(target_os = "windows")]
+    crate::keyboard::ack_typeahead_focus();
+}
+
 #[tauri::command]
 pub async fn show_clipboard_preview(
     app: AppHandle,

@@ -60,6 +60,7 @@ export const TAURI_COMMAND = {
   RESUME_GLOBAL_SHORTCUTS: "resume_global_shortcuts",
   REVEAL_CLIPBOARD_ITEM: "reveal_clipboard_item",
   SAVE_CLIPBOARD_IMAGE_TO_FILE: "save_clipboard_image_to_file",
+  SEARCH_TYPING_ACK: "search_typing_ack",
   SET_AUTOSTART: "set_autostart",
   SET_CLIPBOARD_WINDOW_AUTO_HIDE_SUSPENDED:
     "set_clipboard_window_auto_hide_suspended",

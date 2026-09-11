@@ -340,6 +340,93 @@ const Clipboard = () => {
 };
 ```
 
+### Scenario: Windows Search Type-Ahead (Ditto-Style Type-to-Search)
+
+#### 1. Scope / Trigger
+
+Changing "type anywhere to search" behavior in the Windows clipboard window
+touches the low-level keyboard hook, paste keystroke injection, the editing
+focus pipeline, and the React type-ahead hook.
+
+#### 2. Signatures
+
+- Rust event: `keyboard::SEARCH_TYPING_EVENT = "clipboard://search-typing"`
+  (mirrored as `TAURI_EVENT.SEARCH_TYPING` in `src/constants/events.ts`).
+- Rust command: `search_typing_ack()` in `src-tauri/src/commands/window.rs`
+  (mirrored as `TAURI_COMMAND.SEARCH_TYPING_ACK` + `searchTypingAck()`).
+- Rust hook helpers: `keyboard::windows::{ack_typeahead_focus, typeahead_key}`.
+- Rust keystroke helper: `keystroke::windows::send_keystroke(vk, shift_down)`.
+- Frontend owner: `src/pages/Clipboard/hooks/useSearchTypeahead.ts`.
+- Search debounce owner: `setClipboardSearchKeyword` /
+  `clearClipboardSearch` in `src/stores/clipboardView.ts`.
+
+#### 3. Contracts
+
+- While the Windows clipboard window is visible and no editable is focused,
+  the low-level hook swallows unmodified printable keydowns (letters, digits,
+  OEM symbols — never Space, which stays the preview key) and emits
+  `clipboard://search-typing`.
+- The frontend focuses the search input, then MUST call `searchTypingAck()`;
+  the Rust replay worker waits for this ack plus `GetForegroundWindow()` being
+  the clipboard window before re-injecting the queued keys with
+  `send_keystroke`. Injection uses `LLKHF_INJECTED`, and the hook passes all
+  injected events through so replays are not re-swallowed.
+- Any timeout in the replay worker drops the queue (log debug) — never inject
+  into a non-clipboard foreground window.
+- `set_clipboard_window_editing(true)` must NOT disable navigation hooks
+  immediately; it spawns a focus watcher that only disables the hooks once the
+  clipboard window is actually foreground. This closes the "keys leak to the
+  user's foreground app" window between set_focus dispatch and focus arrival.
+- `useClipboardWindowEditableFocus` must not restore editing on element
+  `focusout` (handoff blur would otherwise give the foreground back mid-browse);
+  restoration happens only on window blur (user leaves the app) or visibility
+  hidden.
+- Search keyword debounce lives in the store (`setClipboardSearchKeyword`)
+  so Escape's `clearClipboardSearch()` can cancel the same pending write that
+  produced the keyword.
+- Escape layering order: preview → search keyword → group → category → hide.
+- macOS relies on real browser keydown: `useSearchTypeahead` focuses the
+  search input synchronously when a printable key arrives with no editable
+  focused; no hook/replay path exists there. `search.default_focus` defaults
+  true on macOS (key window already exists) and false on Windows (no focus
+  steal on open; first typing is handled by type-ahead).
+
+#### 4. Validation & Error Matrix
+
+- Frontend ack missing → replay dropped after 150ms; characters lost (user
+  re-types); no injection elsewhere.
+- Focus acquisition rejected by Windows → watcher rolls back `set_focusable`
+  after 300ms and warns; hooks stay enabled.
+- `disable_navigation_keys` clears the queue and ack so late replays never
+  fire after hide.
+- Paste while editing (Windows): `paste_clipboard_item` exits editing before
+  simulate so Ctrl+V reaches the user's app.
+
+#### 5. Good/Base/Bad Cases
+
+- Good: open window (no focus steal), press `h` → hook swallows it, search
+  focuses, ack, `h` replays into the input, list filters; `e`, `l`, `l`, `o`
+  arrive as native browser keys after the window is foreground.
+- Good: arrows navigate the list while the input is focused (handoff blur);
+  typing afterwards re-focuses the input without re-swallowing (real keydown
+  path).
+- Base: Ctrl/Alt combos, Space preview, digits with Ctrl, and nav keys never
+  enter the type-ahead queue.
+- Bad: replaying with `keybd_event` or non-injected `SendInput` would be
+  re-swallowed by the hook loop — always use injected `SendInput`.
+- Bad: disabling hooks synchronously in `set_clipboard_window_editing(true)`
+  lets fast typists leak keys into their foreground app.
+
+#### 6. Tests Required
+
+- Backend: `typeahead_key` unit tests (letters/digits/OEM in; Space, nav,
+  modifiers, F-keys, numpad out); `cargo clippy -- -D warnings`; `cargo test`.
+- Frontend: `pnpm tsc`, `pnpm lint`.
+- Manual Windows checks: type without focusing (ASCII + IME Chinese), type
+  mid-navigation, Enter paste pinned/unpinned, Escape layering, Ctrl shortcut
+  regression, dialog-open typing not hijacked, click-away then typing stays in
+  the other app.
+
 ## Platform-Specific Tauri Capabilities
 
 Platform-specific plugin permissions must live in their own capability file with

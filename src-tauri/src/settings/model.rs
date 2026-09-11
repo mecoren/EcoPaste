@@ -552,6 +552,11 @@ pub struct Search {
 impl Default for Search {
     fn default() -> Self {
         Self {
+            // macOS 打开即聚焦：panel 本就成为 key window，聚焦让 IME 从首字符正确组合。
+            // Windows 保持不聚焦：窗口显示不抢前台焦点，首次打字由 type-ahead 惰性接管。
+            #[cfg(target_os = "macos")]
+            default_focus: true,
+            #[cfg(not(target_os = "macos"))]
             default_focus: false,
             clear_on_hide: true,
         }

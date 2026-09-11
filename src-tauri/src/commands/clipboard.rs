@@ -423,6 +423,13 @@ pub async fn paste_clipboard_item(
     crate::clipboard::write_to_clipboard(&store, guard.inner().as_ref(), &item, write_plain)?;
     mark_item_reused_if_enabled(&app, &pool, &id, item.kind).await?;
 
+    // Windows：搜索框可能处于 editing 态（窗口是前台），先把前台交还原应用再注入按键，
+    // 否则 Ctrl+V 会命中剪贴板窗口自己。未 editing 时此调用无副作用。
+    #[cfg(target_os = "windows")]
+    if let Err(err) = window::set_clipboard_window_editing(&app, false) {
+        log::warn!("exit clipboard window editing before paste failed: {err:?}");
+    }
+
     if window::is_clipboard_window_pinned() {
         // 固定时窗口保持可见：macOS 上 panel 仍是 key window 会吞掉 ⌘V，需先 resign key
         // 让键焦点回到前台 App 的窗口；Windows 剪贴板窗口 focusable=false，无需处理。

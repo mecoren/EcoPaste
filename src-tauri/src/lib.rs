@@ -155,6 +155,7 @@ pub fn run() {
             commands::set_clipboard_window_pinned,
             commands::set_clipboard_window_auto_hide_suspended,
             commands::set_clipboard_window_editing,
+            commands::search_typing_ack,
             commands::show_clipboard_preview,
             commands::close_clipboard_preview,
             commands::get_clipboard_preview_state,

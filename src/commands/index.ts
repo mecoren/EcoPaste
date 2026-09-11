@@ -1325,6 +1325,17 @@ export const setClipboardWindowEditing = async (editing: boolean) => {
 };
 
 /**
+ * 搜索框聚焦完成后回报 Rust，解锁回放被吞的可打印字符（Ditto 式随时输入即搜索）。
+ */
+export const searchTypingAck = async () => {
+  try {
+    await invoke<void>(TAURI_COMMAND.SEARCH_TYPING_ACK);
+  } catch (error) {
+    log.error("search typing ack failed", toAppError(error));
+  }
+};
+
+/**
  * 打开或重定向剪贴板系统级预览 overlay。
  * `anchor` 是剪贴板窗口 webview client 坐标中的列表项矩形。
  */

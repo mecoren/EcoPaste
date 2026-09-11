@@ -1,5 +1,6 @@
 import { useEventListener, useLatest } from "ahooks";
 import { TAURI_EVENT } from "@/constants/events";
+import { findEditableElement } from "@/utils/dom";
 import { isWinClipboardWindow } from "@/utils/is";
 import { useTauriListen } from "./useTauriListen";
 
@@ -67,24 +68,6 @@ export const useKeyboardEvent = (
     );
   });
 };
-
-function findEditableElement(target: EventTarget | null): HTMLElement | null {
-  if (!(target instanceof Element)) return null;
-
-  let element: Element | null = target;
-  while (element) {
-    if (element instanceof HTMLElement) {
-      if (element.isContentEditable) return element;
-
-      const tagName = element.tagName.toLowerCase();
-      if (tagName === "input" || tagName === "textarea") return element;
-    }
-
-    element = element.parentElement;
-  }
-
-  return null;
-}
 
 function shouldUseNativeEditableKeyboard(target: EventTarget | null) {
   return findEditableElement(target) !== null;

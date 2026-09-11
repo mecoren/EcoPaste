@@ -100,7 +100,8 @@
     "showShortcuts": "显示快捷键",
     "switchCategory": "切换分类",
     "switchCustomGroup": "切换自定义分组",
-    "toggleRange": "切换全部 / 收藏"
+    "toggleRange": "切换全部 / 收藏",
+    "typeToSearch": "随时输入即搜索"
   },
   "types": {
     "color": "颜色",

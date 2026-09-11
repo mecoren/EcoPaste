@@ -1,7 +1,6 @@
-import { useDebounceFn } from "ahooks";
-import type { MenuProps } from "antd";
+import type { InputRef, MenuProps } from "antd";
 import type { ChangeEvent, FC } from "react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useSnapshot } from "valtio";
 import {
@@ -19,9 +18,14 @@ import Tooltip from "@/components/Tooltip";
 import { TAURI_EVENT } from "@/constants/events";
 import { WINDOW_LABEL } from "@/constants/windows";
 import { useTauriListen } from "@/hooks/useTauriListen";
-import { clipboardViewState } from "@/stores/clipboardView";
+import {
+  clearClipboardSearch,
+  clipboardViewState,
+  setClipboardSearchKeyword,
+} from "@/stores/clipboardView";
 import { settingsState } from "@/stores/settings";
 import { formatShortcutDisplay } from "@/utils/shortcut";
+import { useSearchTypeahead } from "../hooks/useSearchTypeahead";
 import SearchInput from "./SearchInput";
 
 interface WindowVisibilityPayload {
@@ -40,10 +44,14 @@ const PREFERENCE_SHORTCUT = formatShortcutDisplay("CmdOrCtrl+,", " ");
 const Header: FC = () => {
   const { t } = useTranslation("clipboard");
   const settings = useSnapshot(settingsState);
+  const { searchClearToken } = useSnapshot(clipboardViewState);
+  const searchInputRef = useRef<InputRef>(null);
   const [pinned, setPinned] = useState(false);
   const [searchBlurToken, setSearchBlurToken] = useState(0);
-  const [searchClearToken, setSearchClearToken] = useState(0);
   const [searchFocusToken, setSearchFocusToken] = useState(0);
+
+  // 搜索框常驻就绪：窗口内任意时刻打字即进入搜索框过滤（Ditto 式）。
+  useSearchTypeahead({ inputRef: searchInputRef });
 
   /**
    * 统一处理偏好设置入口（按钮点击/快捷键）。
@@ -85,27 +93,18 @@ const Header: FC = () => {
   };
 
   /**
-   * 防抖写入共享 store：连续打字时仅保留最后一次值，下游 List 直接消费 store 触发查询。
+   * 打字防抖收口在共享 store：连续输入仅保留最后一次值，下游 List 直接消费 store 触发查询。
    * 搜索框自身不受 store 控制（非受控），避免 IME composition 期回灌导致重复字符。
    */
-  const { cancel: cancelKeywordChange, run: handleKeywordChange } =
-    useDebounceFn(
-      (event: ChangeEvent<HTMLInputElement>) => {
-        clipboardViewState.keyword = event.target.value.trim();
-      },
-      { wait: 200 },
-    );
+  const handleKeywordChange = (event: ChangeEvent<HTMLInputElement>) => {
+    setClipboardSearchKeyword(event.target.value);
+  };
 
   /**
-   * 递增 token 触发搜索框清空，同时同步查询状态回到完整列表。
+   * 清空搜索：取消防抖 pending 写入、关键词立即归零、递增 token 让搜索框重挂载清文本。
    */
   const clearSearch = () => {
-    cancelKeywordChange();
-    clipboardViewState.keyword = "";
-
-    setSearchClearToken((current) => {
-      return current + 1;
-    });
+    clearClipboardSearch();
   };
 
   /**
@@ -192,6 +191,7 @@ const Header: FC = () => {
           className="w-40"
           clearToken={searchClearToken}
           focusToken={searchFocusToken}
+          inputRef={searchInputRef}
           onChange={handleKeywordChange}
           placeholder={t("header.searchPlaceholder")}
           size="small"

@@ -1,8 +1,10 @@
 //! Windows 窗口管理：剪贴板窗口默认不可聚焦，输入控件编辑期间临时恢复可聚焦。
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsWindow, SetForegroundWindow};
 
@@ -11,6 +13,12 @@ use crate::core::Result;
 use crate::{keyboard, mouse};
 
 static PRE_EDIT_FOREGROUND_HWND: Mutex<Option<isize>> = Mutex::new(None);
+/// editing 焦点观察线程单飞位：重复进入 editing 不叠加线程。
+static EDITING_FOCUS_WATCHER_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// 等剪贴板窗口真正成为前台的最长时间；超时视为 SetFocus 被系统拒绝。
+const EDITING_FOCUS_TIMEOUT: Duration = Duration::from_millis(300);
+const EDITING_FOCUS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 pub fn show_window(app_handle: &AppHandle, label: &str) -> Result<()> {
     let window = get_window(app_handle, label)?;
@@ -41,9 +49,13 @@ pub fn set_clipboard_window_editing(app_handle: &AppHandle, editing: bool) -> Re
 
     if editing {
         remember_pre_edit_foreground(hwnd);
-        keyboard::disable_navigation_keys();
         window.set_focusable(true).map_err(|e| anyhow::anyhow!(e))?;
         window.set_focus().map_err(|e| anyhow::anyhow!(e))?;
+
+        // set_focus 是异步派发：等窗口真正成为前台后才禁导航钩子。
+        // 提前禁钩子会让「开始打字到焦点完成」之间连打的字符穿过钩子落进用户前台应用。
+        // 空窗期内钩子继续吞可打印字符入队（typeahead 回放），与打字即搜索机制衔接。
+        spawn_editing_focus_watcher(app_handle);
 
         return Ok(());
     }
@@ -65,6 +77,49 @@ pub fn set_clipboard_window_editing(app_handle: &AppHandle, editing: bool) -> Re
     }
 
     Ok(())
+}
+
+/// 轮询剪贴板窗口前台状态：焦点到位 → 禁导航钩子；超时 → 回滚可聚焦并告警。
+fn spawn_editing_focus_watcher(app_handle: &AppHandle) {
+    if EDITING_FOCUS_WATCHER_RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let app = app_handle.clone();
+
+    std::thread::spawn(move || {
+        let Some(window) = app.get_webview_window(CLIPBOARD_WINDOW_LABEL) else {
+            EDITING_FOCUS_WATCHER_RUNNING.store(false, Ordering::SeqCst);
+            return;
+        };
+
+        let Ok(raw_hwnd) = window.hwnd() else {
+            EDITING_FOCUS_WATCHER_RUNNING.store(false, Ordering::SeqCst);
+            return;
+        };
+
+        let hwnd = HWND(raw_hwnd.0 as isize);
+        let deadline = std::time::Instant::now() + EDITING_FOCUS_TIMEOUT;
+
+        loop {
+            let foreground_matches = unsafe { GetForegroundWindow() == hwnd };
+
+            if foreground_matches {
+                keyboard::disable_navigation_keys();
+                EDITING_FOCUS_WATCHER_RUNNING.store(false, Ordering::SeqCst);
+                return;
+            }
+
+            if std::time::Instant::now() >= deadline {
+                log::warn!("clipboard window editing focus not acquired, rolling back");
+                let _ = window.set_focusable(false);
+                EDITING_FOCUS_WATCHER_RUNNING.store(false, Ordering::SeqCst);
+                return;
+            }
+
+            std::thread::sleep(EDITING_FOCUS_POLL_INTERVAL);
+        }
+    });
 }
 
 pub fn hide_window(app_handle: &AppHandle, label: &str) -> Result<()> {

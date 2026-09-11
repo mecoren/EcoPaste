@@ -42,7 +42,10 @@ import { useClipboardItems } from "@/hooks/useClipboardItems";
 import { useKeyboardEvent } from "@/hooks/useKeyboardEvent";
 import { useTauriListen } from "@/hooks/useTauriListen";
 import { clipboardStatsState } from "@/stores/clipboardStats";
-import { clipboardViewState } from "@/stores/clipboardView";
+import {
+  clearClipboardSearch,
+  clipboardViewState,
+} from "@/stores/clipboardView";
 import { settingsState } from "@/stores/settings";
 import type {
   ClipboardAction,
@@ -1089,11 +1092,16 @@ const List: FC = () => {
   }
 
   /**
-   * ESC 按预览、分组、分类、窗口的顺序逐层退出。
+   * ESC 按预览、搜索词、分组、分类、窗口的顺序逐层退出。
    */
   function closeTopEscapeLayer() {
     if (previewSession !== null) {
       closePreview("escape");
+      return;
+    }
+
+    if (clipboardViewState.keyword.length > 0) {
+      clearClipboardSearch();
       return;
     }
 

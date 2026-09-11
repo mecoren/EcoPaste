@@ -15,7 +15,7 @@ mod windows;
 #[cfg(target_os = "macos")]
 pub use macos::simulate_paste;
 #[cfg(target_os = "windows")]
-pub use windows::simulate_paste;
+pub use windows::{send_keystroke, simulate_paste};
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn simulate_paste() -> crate::core::error::Result<()> {

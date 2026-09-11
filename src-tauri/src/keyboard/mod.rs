@@ -5,5 +5,9 @@
 
 pub const NAV_EVENT: &str = "keyboard://nav";
 
+/// 搜索回放握手事件：钩子吞下首个可打印字符后通知前端聚焦搜索框，
+/// 前端 ack 后由 Rust 回放被吞的按键（保证 IME 从首字符起正常组合）。
+pub const SEARCH_TYPING_EVENT: &str = "clipboard://search-typing";
+
 mod windows;
-pub use windows::{disable_navigation_keys, enable_navigation_keys};
+pub use windows::{ack_typeahead_focus, disable_navigation_keys, enable_navigation_keys};

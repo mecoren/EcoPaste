@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { setClipboardWindowEditing } from "@/commands";
+import { findEditableElement } from "@/utils/dom";
 import { isWinClipboardWindow } from "@/utils/is";
 
 const EDITABLE_BLUR_RESTORE_DELAY_MS = 80;
@@ -12,6 +13,10 @@ export const prepareClipboardWindowEditableFocus = async () => {
 
 /**
  * Windows 剪贴板窗口输入控件激活期间临时允许窗口聚焦，编辑结束后恢复不可聚焦。
+ *
+ * 不监听 focusout：方向键 handoff 等导航键会先 blur 输入框再执行全局快捷键，
+ * 若 blur 即退出 editing，窗口会在用户还在窗口内浏览列表时把前台还给原应用，
+ * 导致「导航后再打字」丢失。只有用户真正离开窗口（点击其它应用 / 窗口隐藏）才退出。
  */
 export const useClipboardWindowEditableFocus = () => {
   useEffect(() => {
@@ -80,7 +85,7 @@ export const useClipboardWindowEditableFocus = () => {
 
     window.addEventListener("pointerdown", handlePointerDown, true);
     window.addEventListener("focusin", handleFocusIn, true);
-    window.addEventListener("focusout", scheduleRestore, true);
+    // window blur 才是「用户离开窗口」信号（点击其它应用 / 系统转移前台）。
     window.addEventListener("blur", scheduleRestore);
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
@@ -88,33 +93,9 @@ export const useClipboardWindowEditableFocus = () => {
       clearRestoreTimer();
       window.removeEventListener("pointerdown", handlePointerDown, true);
       window.removeEventListener("focusin", handleFocusIn, true);
-      window.removeEventListener("focusout", scheduleRestore, true);
       window.removeEventListener("blur", scheduleRestore);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       void setClipboardWindowEditing(false);
     };
   }, []);
 };
-
-function findEditableElement(target: EventTarget | null): HTMLElement | null {
-  if (!(target instanceof Element)) return null;
-
-  let element: Element | null = target;
-  while (element) {
-    if (element instanceof HTMLElement && isEditableElement(element)) {
-      return element;
-    }
-
-    element = element.parentElement;
-  }
-
-  return null;
-}
-
-function isEditableElement(element: HTMLElement) {
-  if (element.isContentEditable) return true;
-
-  const tagName = element.tagName.toLowerCase();
-
-  return tagName === "input" || tagName === "textarea";
-}

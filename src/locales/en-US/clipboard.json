@@ -100,7 +100,8 @@
     "showShortcuts": "Show shortcuts",
     "switchCategory": "Switch category",
     "switchCustomGroup": "Switch custom group",
-    "toggleRange": "Toggle all / favorites"
+    "toggleRange": "Toggle all / favorites",
+    "typeToSearch": "Type anywhere to search"
   },
   "types": {
     "color": "Color",

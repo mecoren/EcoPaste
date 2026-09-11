@@ -27,6 +27,7 @@ const SHORTCUTS: Shortcut[] = [
   { keys: "CmdOrCtrl+Enter", labelKey: "shortcuts.pasteSelectedPlain" },
   { keys: ["CmdOrCtrl", "1-0"], labelKey: "shortcuts.pasteNth" },
   { keys: "Space", labelKey: "shortcuts.previewSelected" },
+  { keys: "A-Z", labelKey: "shortcuts.typeToSearch" },
   { keys: "CmdOrCtrl+C", labelKey: "shortcuts.copySelected" },
   { keys: "CmdOrCtrl+O", labelKey: "shortcuts.openSelected" },
   { keys: "CmdOrCtrl+M", labelKey: "shortcuts.noteSelected" },
