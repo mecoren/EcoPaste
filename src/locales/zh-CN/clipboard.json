@@ -1,4 +1,10 @@
 {
+  "edit": {
+    "emptyHint": "内容不能为空",
+    "placeholder": "输入新的文本内容...",
+    "richTextNotice": "该条目为富文本，保存后将转为纯文本，格式样式不会被保留。",
+    "title": "编辑内容"
+  },
   "empty": {
     "categories": {
       "files": "文件",
@@ -89,6 +95,7 @@
     "copySelected": "复制选中项",
     "createGroup": "新增分组",
     "deleteSelected": "删除选中项",
+    "editSelected": "编辑选中项内容",
     "favoriteSelected": "收藏 / 取消收藏",
     "focusSearch": "聚焦搜索框",
     "navigate": "上下导航",

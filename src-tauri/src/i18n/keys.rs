@@ -14,6 +14,7 @@ pub enum ClipboardMenuKey {
     PinItem,
     UnpinItem,
     MoveToGroup,
+    EditContent,
     AddNote,
     EditNote,
     Delete,

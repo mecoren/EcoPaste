@@ -573,18 +573,41 @@ pub async fn get_clipboard_item(
     let pool = db.pool().await;
     let mut item = find_item_for_list_by_id(&pool, &id).await?;
     if let Some(item) = item.as_mut() {
-        let settings = app.state::<SettingsStore>().snapshot();
-        let file_entry_limit = settings.clipboard.display.file_entry_limit();
-        let redact_sensitive = settings.clipboard.sensitive.redact_secrets;
-        attach_image_thumbnail_path(&image_store, item).await?;
-        attach_source_app_icon_path(&app_icon_store, item);
-        attach_file_entries(&pool, &file_icon_store, item, file_entry_limit).await?;
-        attach_color_preview(item);
-        attach_display_created_at(item, &Local::now());
-        redact_sensitive_list_item(item, redact_sensitive);
-        item.available_actions = compute_available_actions(item);
+        enrich_list_item(
+            &app,
+            &pool,
+            &image_store,
+            &app_icon_store,
+            &file_icon_store,
+            item,
+        )
+        .await?;
     }
     Ok(item)
+}
+
+/// 对列表视图条目补齐前端渲染所需的全量派生字段（缩略图 / 应用图标 / 文件条目 /
+/// 色值预览 / 时间展示 / 脱敏 / 右键动作）。`get_clipboard_item` 与
+/// `update_clipboard_item_text` 共用，保证事件刷新与编辑回填拿到同构 payload。
+async fn enrich_list_item(
+    app: &AppHandle,
+    pool: &SqlitePool,
+    image_store: &ImageStore,
+    app_icon_store: &AppIconStore,
+    file_icon_store: &FileIconStore,
+    item: &mut ClipboardItem,
+) -> Result<()> {
+    let settings = app.state::<SettingsStore>().snapshot();
+    let file_entry_limit = settings.clipboard.display.file_entry_limit();
+    let redact_sensitive = settings.clipboard.sensitive.redact_secrets;
+    attach_image_thumbnail_path(image_store, item).await?;
+    attach_source_app_icon_path(app_icon_store, item);
+    attach_file_entries(pool, file_icon_store, item, file_entry_limit).await?;
+    attach_color_preview(item);
+    attach_display_created_at(item, &Local::now());
+    redact_sensitive_list_item(item, redact_sensitive);
+    item.available_actions = compute_available_actions(item);
+    Ok(())
 }
 
 /// 为 image 条目补齐缩略图绝对路径，前端可直接渲染。
@@ -781,6 +804,9 @@ fn compute_available_actions(item: &ClipboardItem) -> Vec<ClipboardAction> {
 
     actions.push(ClipboardAction::ToggleFavorite);
     actions.push(ClipboardAction::TogglePinned);
+    if item.kind == ClipboardKind::Text {
+        actions.push(ClipboardAction::EditContent);
+    }
     actions.push(ClipboardAction::EditNote);
     actions.push(ClipboardAction::Delete);
 
@@ -1393,6 +1419,93 @@ pub async fn clear_clipboard_items(
     Ok(outcome.removed)
 }
 
+/// 读取文本条目的「可编辑文本源」（Ditto 式 edit entry 的弹窗回显）。
+/// 富文本条目（html/rtf）返回纯文本表示（`search_text`，与预览窗一致），
+/// 其余文本条目返回 `content` 原文。仅 `kind = text`；其它类型返回 `None`，
+/// 前端据此不打开编辑弹窗。列表视图的 `content` 被 Rust 置空，编辑必须走本命令拿全文。
+#[tauri::command]
+pub async fn get_clipboard_item_edit_text(
+    db: State<'_, DatabaseState>,
+    id: String,
+) -> Result<Option<String>> {
+    let pool = db.pool().await;
+    let Some(item) = find_item_by_id(&pool, &id).await? else {
+        return Ok(None);
+    };
+    if item.kind != ClipboardKind::Text {
+        return Ok(None);
+    }
+
+    let text = match item.sub_kind {
+        Some(ClipboardSubKind::Html | ClipboardSubKind::Rtf) => item.search_text,
+        _ => Some(item.content),
+    };
+    Ok(text)
+}
+
+/// 就地更新文本条目内容（Ditto 式 edit entry）。
+///
+/// 校验：条目存在且为文本、trim 后非空、不超过「文本最大收录大小」设置。
+/// 保存语义：单条 UPDATE 重写内容派生字段（hash / search_text / summary /
+/// sub_kind / size），不动 `updated_at` 与收藏、置顶、备注、分组、使用计数——
+/// 与备注/分组编辑同属元数据级修改，不污染最近使用排序。
+/// 富文本条目以纯文本保存，`sub_kind` 按新文本重新识别。
+/// 返回 enrich 后的列表视图条目，前端直接回填本地镜像，无需广播事件。
+#[tauri::command]
+pub async fn update_clipboard_item_text(
+    app: AppHandle,
+    db: State<'_, DatabaseState>,
+    image_store: State<'_, ImageStore>,
+    app_icon_store: State<'_, AppIconStore>,
+    file_icon_store: State<'_, FileIconStore>,
+    id: String,
+    content: String,
+) -> Result<ClipboardItem> {
+    let pool = db.pool().await;
+    let item = find_item_by_id(&pool, &id)
+        .await?
+        .ok_or_else(|| AppError::Clipboard(format!("剪贴板记录不存在：{id}")))?;
+    if item.kind != ClipboardKind::Text {
+        return Err(AppError::Clipboard("仅支持编辑文本内容".to_owned()));
+    }
+
+    // 与采集入库同语义：一律以 trim 后的纯文本落库（ingest 的 plain 路径同样 trim），
+    // 保证编辑结果与直接复制同样文本得到的记录完全一致。
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::Clipboard("内容不能为空".to_owned()));
+    }
+
+    let capture = app
+        .state::<SettingsStore>()
+        .snapshot()
+        .clipboard
+        .capture
+        .clone();
+    if crate::clipboard::exceeds_limit(trimmed.len(), capture.max_text_bytes()) {
+        return Err(AppError::Clipboard("内容大小超出文本收录上限".to_owned()));
+    }
+
+    let outcome = crate::db::items::update_item_text(&pool, &id, trimmed).await?;
+    if outcome.updated == 0 {
+        return Err(AppError::Clipboard(format!("剪贴板记录不存在：{id}")));
+    }
+
+    let mut updated = find_item_for_list_by_id(&pool, &id)
+        .await?
+        .ok_or_else(|| AppError::Clipboard(format!("剪贴板记录不存在：{id}")))?;
+    enrich_list_item(
+        &app,
+        &pool,
+        &image_store,
+        &app_icon_store,
+        &file_icon_store,
+        &mut updated,
+    )
+    .await?;
+    Ok(updated)
+}
+
 /// 更新备注（薄封装）。`note = None` 或空串清空备注；空串归一化为 None，
 /// 保证「无备注」在库里只有一种表示（NULL），避免后续筛选/展示判别两套逻辑。
 ///
@@ -1788,6 +1901,31 @@ mod tests {
         let actions = compute_available_actions(&text_item(None, false));
 
         assert!(!actions.contains(&ClipboardAction::SaveImage));
+    }
+
+    #[test]
+    fn text_actions_include_edit_content_before_edit_note() {
+        let actions = compute_available_actions(&text_item(None, false));
+
+        let edit = actions
+            .iter()
+            .position(|a| *a == ClipboardAction::EditContent)
+            .expect("text item should allow editing content");
+        let note = actions
+            .iter()
+            .position(|a| *a == ClipboardAction::EditNote)
+            .expect("edit note is always available");
+
+        assert!(edit < note);
+    }
+
+    #[test]
+    fn image_and_files_actions_exclude_edit_content() {
+        assert!(!compute_available_actions(&image_item()).contains(&ClipboardAction::EditContent));
+
+        let mut files = image_item();
+        files.kind = ClipboardKind::Files;
+        assert!(!compute_available_actions(&files).contains(&ClipboardAction::EditContent));
     }
 
     #[test]

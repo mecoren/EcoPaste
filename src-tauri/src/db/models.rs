@@ -141,6 +141,8 @@ pub enum ClipboardAction {
     ToggleFavorite,
     /// 切换置顶（恒在；前端按 `is_pinned` 切「置顶 / 取消置顶」文案）。
     TogglePinned,
+    /// 编辑内容（`kind = text`；编辑纯文本表示，富文本保存后转纯文本）。
+    EditContent,
     /// 编辑备注（恒在）。
     EditNote,
     /// 删除条目（恒在）。

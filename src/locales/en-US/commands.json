@@ -28,6 +28,7 @@
     "drag": "Drag",
     "exportBackup": "Export backup",
     "finishOnboarding": "Finish onboarding",
+    "getEditText": "Get editable text",
     "importBackup": "Import backup",
     "importClipboardGroupSvg": "Import SVG icon",
     "importLegacyData": "Import legacy data",
@@ -66,6 +67,7 @@
     "saveNote": "Save note",
     "saveOnboarding": "Save onboarding progress",
     "saveSettings": "Save settings",
+    "saveText": "Save content",
     "setAutostart": "Set launch at login",
     "setClipboardWindowAutoHideSuspended": "Keep window visible",
     "setClipboardWindowPinned": "Pin window",
@@ -99,6 +101,7 @@
     "noteSavedAndFavorited": "Saved and favorited",
     "settingsReset": "Preferences reset",
     "storageLocationChanged": "Data directory changed",
-    "storageLocationReset": "Data directory reset"
+    "storageLocationReset": "Data directory reset",
+    "textSaved": "Content saved"
   }
 }

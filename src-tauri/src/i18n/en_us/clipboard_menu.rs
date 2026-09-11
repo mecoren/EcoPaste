@@ -17,6 +17,7 @@ pub fn label(key: Key) -> &'static str {
         Key::PinItem => "Pin to Top",
         Key::UnpinItem => "Unpin from Top",
         Key::MoveToGroup => "Move to Group",
+        Key::EditContent => "Edit Content",
         Key::AddNote => "Add Note",
         Key::EditNote => "Edit Note",
         Key::Delete => "Delete",

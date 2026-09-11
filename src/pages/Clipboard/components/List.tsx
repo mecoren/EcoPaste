@@ -63,6 +63,7 @@ import {
   useClipboardPreviewController,
 } from "../hooks/useClipboardPreviewController";
 import ClipboardCard from "./cards/ClipboardCard";
+import EditModal from "./EditModal";
 import NoteModal from "./NoteModal";
 
 /** 前 10 项的快捷键：index 0-8 对应 1-9，index 9 对应 0 */
@@ -93,6 +94,7 @@ const List: FC = () => {
   const [isModifierPressed, setIsModifierPressed] = useState(false);
   const [customGroups, setCustomGroups] = useState<ClipboardGroupRecord[]>([]);
   const [noteTarget, setNoteTarget] = useState<ClipboardItem | null>(null);
+  const [editTarget, setEditTarget] = useState<ClipboardItem | null>(null);
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const isAtTopRef = useRef(true);
   const itemElementMapRef = useRef(new Map<string, HTMLDivElement>());
@@ -386,6 +388,29 @@ const List: FC = () => {
   };
 
   /**
+   * 打开文本条目内容编辑框（仅 `kind = text`，Rust 的 availableActions 已过滤）；
+   * 若该条正在预览，先关闭预览避免窗口层级互相遮挡。
+   */
+  const handleOpenEdit = (item: ClipboardItem, reason: string) => {
+    if (item.kind !== "text") return;
+    if (previewSession?.itemId === item.id) closePreview(reason);
+
+    setEditTarget(item);
+  };
+
+  /**
+   * 内容保存后整体回填本地镜像：Rust 返回的条目已含重算的 summary / subKind /
+   * availableActions 等派生字段，逐字段 patch 会漏，直接用完整对象替换。
+   */
+  const handleEditSaved = (updated: ClipboardItem) => {
+    patchItemById(updated.id, updated);
+  };
+
+  const handleCloseEdit = () => {
+    setEditTarget(null);
+  };
+
+  /**
    * 右键菜单移动分组后同步本地镜像；当前分组视图下移出其它分组时直接移除。
    */
   const handleMoveToGroup = async (
@@ -571,6 +596,9 @@ const List: FC = () => {
 
         void handleMoveToGroup(target, targetGroupId);
         return;
+      case "editContent":
+        handleOpenEdit(target, "editContent");
+        return;
       case "editNote":
         handleOpenNote(target, "editNote");
         return;
@@ -693,6 +721,17 @@ const List: FC = () => {
       return;
     }
 
+    if (eventModifierPressed && event.key.toLowerCase() === "e") {
+      const activeItem = getActiveItem();
+
+      if (activeItem?.kind !== "text") return;
+
+      event.preventDefault();
+      handleOpenEdit(activeItem, "shortcutEditContent");
+
+      return;
+    }
+
     if (eventModifierPressed && event.key.toLowerCase() === "m") {
       event.preventDefault();
 
@@ -810,6 +849,12 @@ const List: FC = () => {
       role="listbox"
     >
       <VirtuosoScroller>{renderVirtuoso}</VirtuosoScroller>
+
+      <EditModal
+        item={editTarget}
+        onClose={handleCloseEdit}
+        onSaved={handleEditSaved}
+      />
 
       <NoteModal
         item={noteTarget}

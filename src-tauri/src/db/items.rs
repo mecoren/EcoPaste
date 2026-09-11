@@ -239,6 +239,55 @@ pub async fn update_item_note(pool: &SqlitePool, id: &str, note: Option<&str>) -
     Ok(())
 }
 
+/// 文本条目内容编辑的就地更新结果：`updated` 为受影响行数（0 = id 不存在）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpdateTextOutcome {
+    pub updated: u64,
+}
+
+/// 就地更新文本条目的内容（Ditto 式 edit entry）。
+///
+/// 单条 UPDATE 同时重写派生字段：`content_hash`（重算指纹）、`search_text`、
+/// `summary`（ingest 同款截断）、`sub_kind`（按新文本重新识别，富文本条目保存后
+/// 即为纯文本语义）、`size`（UTF-8 字节数）。FTS 同步由既有
+/// `clipboard_items_au` AFTER UPDATE 触发器自动完成——正因如此编辑必须走
+/// UPDATE 而非 DELETE+INSERT。
+///
+/// 不刷新 `updated_at`（该时间戳语义是「内容被重新使用」的最近使用排序依据），
+/// 也不动 use_count / 收藏 / 置顶 / 备注 / 分组等元数据；调用方负责前置校验
+/// （条目存在、kind 为 text、trim 非空、大小上限）。
+pub async fn update_item_text(
+    pool: &SqlitePool,
+    id: &str,
+    content: &str,
+) -> Result<UpdateTextOutcome> {
+    let hash = content_hash(ClipboardKind::Text, content);
+    let search_text = content.trim();
+    let summary = crate::clipboard::make_summary(search_text);
+    let sub_kind = crate::clipboard::detect_text_sub_kind(search_text);
+    let size = content.len() as i64;
+
+    let result = sqlx::query(
+        "UPDATE clipboard_items \
+         SET content = ?, content_hash = ?, search_text = ?, summary = ?, sub_kind = ?, size = ? \
+         WHERE id = ?",
+    )
+    .bind(content)
+    .bind(&hash)
+    .bind(search_text)
+    .bind(summary)
+    .bind(sub_kind)
+    .bind(size)
+    .bind(id)
+    .execute(pool)
+    .await
+    .context("failed to update clipboard item text")?;
+
+    Ok(UpdateTextOutcome {
+        updated: result.rows_affected(),
+    })
+}
+
 /// 更新条目所属分组；不刷新 `updated_at`，避免污染最近使用排序。
 pub async fn update_item_group(pool: &SqlitePool, id: &str, group_id: Option<&str>) -> Result<()> {
     sqlx::query("UPDATE clipboard_items SET group_id = ? WHERE id = ?")
@@ -576,7 +625,9 @@ mod tests {
     use super::*;
     use crate::db::apps::upsert_app;
     use crate::db::groups::insert_group;
-    use crate::db::models::{ClipboardApp, ClipboardGroup, ClipboardKind, Platform};
+    use crate::db::models::{
+        ClipboardApp, ClipboardGroup, ClipboardKind, ClipboardSubKind, Platform,
+    };
     use crate::db::test_support::memory_pool;
     use chrono::DateTime;
 
@@ -1070,6 +1121,100 @@ mod tests {
         assert_eq!(
             find_item_by_id(&pool, "a").await.unwrap().unwrap().note,
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn update_item_text_updates_derived_fields_and_preserves_metadata() {
+        let pool = memory_pool().await;
+        let mut item = sample_item("a");
+        item.note = Some("keep note".to_owned());
+        item.is_favorite = true;
+        item.is_pinned = true;
+        item.use_count = 7;
+        insert_item(&pool, &item).await.unwrap();
+
+        let outcome = update_item_text(&pool, "a", "https://eco-paste.app")
+            .await
+            .unwrap();
+        assert_eq!(outcome.updated, 1);
+
+        let after = find_item_by_id(&pool, "a").await.unwrap().unwrap();
+        assert_eq!(after.content, "https://eco-paste.app");
+        assert_eq!(after.search_text.as_deref(), Some("https://eco-paste.app"));
+        assert_eq!(after.summary.as_deref(), Some("https://eco-paste.app"));
+        assert_eq!(after.sub_kind, Some(ClipboardSubKind::Url));
+        assert_eq!(
+            after.content_hash,
+            content_hash(ClipboardKind::Text, "https://eco-paste.app")
+        );
+        assert_eq!(after.size, Some("https://eco-paste.app".len() as i64));
+        // 元数据与时间戳一律不动：编辑是元数据级修改，不污染最近使用排序。
+        assert_eq!(after.note.as_deref(), Some("keep note"));
+        assert!(after.is_favorite);
+        assert!(after.is_pinned);
+        assert_eq!(after.use_count, 7);
+        assert_eq!(after.created_at, item.created_at);
+        assert_eq!(after.updated_at, item.updated_at);
+    }
+
+    #[tokio::test]
+    async fn update_item_text_flattens_rich_text_sub_kind() {
+        let pool = memory_pool().await;
+        let mut item = sample_item("a");
+        item.sub_kind = Some(ClipboardSubKind::Html);
+        item.content = "<b>Hello</b>".to_owned();
+        item.content_hash = content_hash(ClipboardKind::Text, "<b>Hello</b>");
+        item.search_text = Some("Hello".to_owned());
+        insert_item(&pool, &item).await.unwrap();
+
+        update_item_text(&pool, "a", "Hello edited").await.unwrap();
+
+        let after = find_item_by_id(&pool, "a").await.unwrap().unwrap();
+        // 富文本以纯文本保存：sub_kind 按新文本重新识别，不再是 Html。
+        assert_eq!(after.sub_kind, None);
+        assert_eq!(after.content, "Hello edited");
+    }
+
+    #[tokio::test]
+    async fn update_item_text_syncs_fts_index() {
+        let pool = memory_pool().await;
+        insert_item(&pool, &sample_item("a")).await.unwrap();
+
+        update_item_text(&pool, "a", "trigram-target-text")
+            .await
+            .unwrap();
+
+        // ≥3 字符关键词走 FTS5：新词命中、旧词不再命中（触发器同步生效）。
+        let query = ClipboardItemQuery {
+            keyword: Some("trigram-target-text".to_owned()),
+            ..Default::default()
+        };
+        let (hits, total) = query_items_page(&pool, &query).await.unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(ids(&hits), ["a"]);
+
+        let stale = ClipboardItemQuery {
+            keyword: Some("content-".to_owned()),
+            ..Default::default()
+        };
+        let (_, stale_total) = query_items_page(&pool, &stale).await.unwrap();
+        assert_eq!(stale_total, 0);
+    }
+
+    #[tokio::test]
+    async fn update_item_text_missing_id_updates_nothing() {
+        let pool = memory_pool().await;
+        insert_item(&pool, &sample_item("a")).await.unwrap();
+
+        let outcome = update_item_text(&pool, "missing", "new text")
+            .await
+            .unwrap();
+        assert_eq!(outcome.updated, 0);
+        // 原行不受影响。
+        assert_eq!(
+            find_item_by_id(&pool, "a").await.unwrap().unwrap().content,
+            "content-a"
         );
     }
 

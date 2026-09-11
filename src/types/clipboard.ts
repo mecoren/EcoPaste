@@ -32,6 +32,7 @@ export type ClipboardAction =
   | "toggleFavorite"
   | "togglePinned"
   | "moveToGroup"
+  | "editContent"
   | "editNote"
   | "delete";
 

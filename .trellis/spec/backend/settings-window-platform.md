@@ -236,6 +236,27 @@ keyboard and mouse hooks while the clipboard window is visible:
 React code uses `useKeyboardEvent` so components do not need to know whether the
 event came from the browser or Rust.
 
+### Contract: Ctrl Shortcut Whitelist Mirror
+
+`keyboard/windows.rs::ctrl_shortcut_key` is a whitelist of Ctrl-combos the
+low-level hook intercepts and re-emits as `keyboard://nav` while the clipboard
+window is visible but not focused (its normal Windows state, since the window
+is non-focusable). Any Ctrl shortcut handled in the React clipboard list
+(`List.tsx` `handleKeyDown`) or shown in `ShortcutList.tsx` MUST be present in
+this whitelist; a missing entry means the keypress falls through to the user's
+foreground app and the shortcut silently stops working when the window is not
+focused. `macOS` needs no mirror — its menu accelerators and browser keyboard
+bubbling deliver the events directly.
+
+Current mirror (VK -> key): C copy, D favorite, E edit content, F focus search,
+K shortcut panel, M note, N create group, O open link, P pin window,
+Q all/favorite, T pin item, comma preferences, 0-9 quick paste,
+Enter paste, Backspace/Delete delete.
+
+`ctrl_shortcut_key_whitelists_frontend_shortcuts_only` in
+`keyboard/windows.rs` locks this contract: extend that test whenever a new
+Ctrl shortcut is added to the frontend.
+
 ### Scenario: Windows Clipboard Editable Focus
 
 #### 1. Scope / Trigger

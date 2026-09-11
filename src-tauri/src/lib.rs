@@ -108,6 +108,8 @@ pub fn run() {
             commands::delete_clipboard_group,
             commands::import_clipboard_group_svg,
             commands::get_clipboard_item,
+            commands::get_clipboard_item_edit_text,
+            commands::update_clipboard_item_text,
             commands::list_clipboard_apps,
             commands::list_all_apps,
             commands::add_clipboard_app_from_path,

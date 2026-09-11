@@ -17,6 +17,7 @@ import type {
   ClipboardApp,
   ClipboardGroupInput,
   ClipboardGroupRecord,
+  ClipboardItem,
   ClipboardItemPage,
   ClipboardItemQuery,
   ClipboardKind,
@@ -1174,7 +1175,37 @@ export const updateClipboardItemNote = async (
 };
 
 /**
- * 按窗口 label 显示窗口（偏好窗口、剪贴板窗口等）。
+ * 读取文本条目的编辑源文本（Ditto 式 edit entry 弹窗回显）。
+ * 富文本条目返回纯文本表示，其余文本条目返回 `content` 原文；
+ * 非文本条目或记录不存在返回 `null`，调用方据此不打开编辑弹窗。
+ */
+export const getClipboardItemEditText = (id: string) => {
+  return call<string | null>(
+    TAURI_COMMAND.GET_CLIPBOARD_ITEM_EDIT_TEXT,
+    "commands:labels.getEditText",
+    { id },
+  );
+};
+
+/**
+ * 就地更新文本条目内容；Rust 侧单条 UPDATE 重写派生字段（hash / 搜索文本 /
+ * 摘要 / 子类型 / 大小），不动最近使用时间与收藏、置顶、备注、分组等元数据，
+ * FTS 由触发器自动同步。返回 enrich 后的完整列表条目，调用方直接整体回填本地镜像。
+ */
+export const updateClipboardItemText = async (id: string, text: string) => {
+  const updated = await call<ClipboardItem>(
+    TAURI_COMMAND.UPDATE_CLIPBOARD_ITEM_TEXT,
+    "commands:labels.saveText",
+    { content: text, id },
+  );
+
+  getMessageApi().success(i18n.t("commands:messages.textSaved"));
+
+  return updated;
+};
+
+/**
+ * 按窗口 label 显示窗口（偏好设置窗口、剪贴板窗口等）。
  */
 export const showWindow = (label: string) => {
   return call<void>(TAURI_COMMAND.SHOW_WINDOW, "commands:labels.openWindow", {

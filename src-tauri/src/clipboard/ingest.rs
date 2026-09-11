@@ -22,11 +22,12 @@ use crate::settings::{Capture, CaptureKind, Sensitive};
 
 /// 列表渲染用摘要的最大字符数（按 Unicode 标量计，不是字节）。
 /// 超过此长度的文本会被截断，前端列表只渲染摘要，预览/写回时再读完整 `content`。
-pub const SUMMARY_MAX_CHARS: usize = 256;
+pub(crate) const SUMMARY_MAX_CHARS: usize = 256;
 
 /// 从纯文本生成列表摘要：trim 后按 [`SUMMARY_MAX_CHARS`] 字符截断。
 /// 输入空串返回 `None`。HTML/RTF 也用这个，输入是 OS 同时提供的纯文本，不解析富文本。
-fn make_summary(plain: &str) -> Option<String> {
+/// 文本条目编辑保存时同样用它重建 `summary`，保证两条路径的截断规则一致。
+pub fn make_summary(plain: &str) -> Option<String> {
     let trimmed = plain.trim();
     if trimmed.is_empty() {
         return None;
@@ -173,7 +174,8 @@ fn count_text_bytes(text: &str) -> i64 {
 }
 
 /// 判断字节数是否超过 MB 设置换算出的限制；`None` 表示不限。
-fn exceeds_limit(size: usize, limit: Option<u64>) -> bool {
+/// 文本条目编辑保存时复用，保证编辑结果与采集入库的大小约束一致。
+pub fn exceeds_limit(size: usize, limit: Option<u64>) -> bool {
     limit.is_some_and(|limit| size as u64 > limit)
 }
 

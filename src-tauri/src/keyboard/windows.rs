@@ -40,11 +40,12 @@ fn consumed_keys() -> &'static Mutex<HashSet<u32>> {
     SET.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-/// 仅放行当前前端需要的 Ctrl 快捷键：C、D、F、K、M、N、O、P、Q、T、Enter、Backspace、Delete、逗号与数字 0-9。
+/// 仅放行当前前端需要的 Ctrl 快捷键：C、D、E、F、K、M、N、O、P、Q、T、Enter、Backspace、Delete、逗号与数字 0-9。
 fn ctrl_shortcut_key(vk: u32) -> Option<String> {
     match vk as i32 {
         0x43 => Some("c".to_string()),
         0x44 => Some("d".to_string()),
+        0x45 => Some("e".to_string()),
         0x46 => Some("f".to_string()),
         0x4B => Some("k".to_string()),
         0x4D => Some("m".to_string()),
@@ -424,11 +425,40 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
 
 #[cfg(test)]
 mod tests {
-    use super::typeahead_key;
+    use super::{ctrl_shortcut_key, typeahead_key};
     use winapi::um::winuser::{
         VK_BACK, VK_CONTROL, VK_DOWN, VK_LEFT, VK_MENU, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE,
         VK_TAB, VK_UP,
     };
+
+    #[test]
+    fn ctrl_shortcut_key_whitelists_frontend_shortcuts_only() {
+        // 与前端 List.tsx 的 Ctrl 快捷键一一对应；漏一个该快捷键在窗口
+        // 未聚焦时（Windows 剪贴板窗口常态）就落不到前端。
+        for (vk, key) in [
+            (0x43, "c"), // 复制
+            (0x44, "d"), // 收藏
+            (0x45, "e"), // 编辑内容
+            (0x46, "f"), // 聚焦搜索
+            (0x4B, "k"), // 快捷键面板
+            (0x4D, "m"), // 备注
+            (0x4E, "n"), // 新增分组
+            (0x4F, "o"), // 打开链接
+            (0x50, "p"), // 固定窗口
+            (0x51, "q"), // 全部/收藏
+            (0x54, "t"), // 置顶
+        ] {
+            assert_eq!(
+                ctrl_shortcut_key(vk),
+                Some(key.to_owned()),
+                "vk 0x{vk:X} should map to {key}"
+            );
+        }
+        // 白名单外（如 Ctrl+A/B/G）不吞，交给系统/前台应用。
+        assert_eq!(ctrl_shortcut_key(0x41), None);
+        assert_eq!(ctrl_shortcut_key(0x42), None);
+        assert_eq!(ctrl_shortcut_key(0x47), None);
+    }
 
     #[test]
     fn typeahead_key_accepts_letters_digits_and_oem_symbols() {

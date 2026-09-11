@@ -38,6 +38,7 @@ pub enum ClipboardMenuAction {
     ToggleFavorite,
     TogglePinned,
     MoveToGroup,
+    EditContent,
     EditNote,
     Delete,
 }
@@ -78,6 +79,7 @@ impl ClipboardMenuAction {
                 }
             }
             Self::MoveToGroup => Key::MoveToGroup,
+            Self::EditContent => Key::EditContent,
             Self::EditNote => {
                 if has_note {
                     Key::EditNote
@@ -104,6 +106,7 @@ impl ClipboardMenuAction {
             Self::ToggleFavorite => Some("CmdOrCtrl+D"),
             Self::TogglePinned => Some("CmdOrCtrl+T"),
             Self::MoveToGroup => None,
+            Self::EditContent => Some("CmdOrCtrl+E"),
             Self::EditNote => Some("CmdOrCtrl+M"),
             Self::Delete => Some("CmdOrCtrl+Backspace"),
         }
@@ -129,6 +132,7 @@ pub(super) const ACTION_GROUPS: &[&[ClipboardMenuAction]] = &[
         ClipboardMenuAction::ToggleFavorite,
         ClipboardMenuAction::TogglePinned,
         ClipboardMenuAction::MoveToGroup,
+        ClipboardMenuAction::EditContent,
         ClipboardMenuAction::EditNote,
     ],
     &[ClipboardMenuAction::Delete],
@@ -220,6 +224,7 @@ mod native {
                 Self::ToggleFavorite => "cim::toggleFavorite",
                 Self::TogglePinned => "cim::togglePinned",
                 Self::MoveToGroup => "cim::moveToGroup",
+                Self::EditContent => "cim::editContent",
                 Self::EditNote => "cim::editNote",
                 Self::Delete => "cim::delete",
             }
@@ -239,6 +244,7 @@ mod native {
                 ClipboardMenuAction::ToggleFavorite,
                 ClipboardMenuAction::TogglePinned,
                 ClipboardMenuAction::MoveToGroup,
+                ClipboardMenuAction::EditContent,
                 ClipboardMenuAction::EditNote,
                 ClipboardMenuAction::Delete,
             ];

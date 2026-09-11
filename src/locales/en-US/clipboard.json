@@ -1,4 +1,10 @@
 {
+  "edit": {
+    "emptyHint": "Content cannot be empty",
+    "placeholder": "Enter the new text content...",
+    "richTextNotice": "This is a rich text item. Saving will convert it to plain text; formatting will not be kept.",
+    "title": "Edit Content"
+  },
   "empty": {
     "categories": {
       "files": "file",
@@ -89,6 +95,7 @@
     "copySelected": "Copy selected item",
     "createGroup": "Create group",
     "deleteSelected": "Delete selected item",
+    "editSelected": "Edit selected item content",
     "favoriteSelected": "Favorite / unfavorite",
     "focusSearch": "Focus search",
     "navigate": "Navigate up/down",

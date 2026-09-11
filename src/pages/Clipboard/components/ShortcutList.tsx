@@ -30,6 +30,7 @@ const SHORTCUTS: Shortcut[] = [
   { keys: "A-Z", labelKey: "shortcuts.typeToSearch" },
   { keys: "CmdOrCtrl+C", labelKey: "shortcuts.copySelected" },
   { keys: "CmdOrCtrl+O", labelKey: "shortcuts.openSelected" },
+  { keys: "CmdOrCtrl+E", labelKey: "shortcuts.editSelected" },
   { keys: "CmdOrCtrl+M", labelKey: "shortcuts.noteSelected" },
   { keys: "CmdOrCtrl+D", labelKey: "shortcuts.favoriteSelected" },
   { keys: "CmdOrCtrl+T", labelKey: "shortcuts.pinSelected" },

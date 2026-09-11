@@ -28,6 +28,7 @@
     "drag": "拖拽",
     "exportBackup": "导出备份",
     "finishOnboarding": "完成引导",
+    "getEditText": "读取编辑文本",
     "importBackup": "导入备份",
     "importClipboardGroupSvg": "导入 SVG 图标",
     "importLegacyData": "导入旧版数据",
@@ -66,6 +67,7 @@
     "saveNote": "保存备注",
     "saveOnboarding": "保存引导进度",
     "saveSettings": "保存设置",
+    "saveText": "保存内容",
     "setAutostart": "设置开机启动",
     "setClipboardWindowAutoHideSuspended": "保持窗口显示",
     "setClipboardWindowPinned": "固定窗口",
@@ -99,6 +101,7 @@
     "noteSavedAndFavorited": "已保存并收藏",
     "settingsReset": "偏好已重置",
     "storageLocationChanged": "数据目录已更改",
-    "storageLocationReset": "数据目录已还原"
+    "storageLocationReset": "数据目录已还原",
+    "textSaved": "内容已保存"
   }
 }
