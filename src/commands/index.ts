@@ -616,6 +616,25 @@ export const cleanResourceCache = async () => {
 };
 
 /**
+ * 压缩数据库：checkpoint 收缩 WAL + VACUUM 回收 DELETE 留下的文件空洞。
+ * 返回压缩后的数据库字节数供前端刷新存储占用。
+ */
+export const compactDatabase = async () => {
+  const databaseBytes = await call<number>(
+    TAURI_COMMAND.COMPACT_DATABASE,
+    "commands:labels.compactDatabase",
+  );
+
+  getMessageApi().success(
+    i18n.t("commands:messages.databaseCompacted", {
+      size: formatCommandBytes(databaseBytes),
+    }),
+  );
+
+  return databaseBytes;
+};
+
+/**
  * 打开偏好页固定本地目录：数据目录或日志目录。
  */
 export const openPreferenceDirectory = (target: PreferenceDirectoryTarget) => {

@@ -388,6 +388,10 @@
           "description": "Check and clean history every specified number of hours. 0 disables periodic cleanup; startup cleanup still runs once.",
           "title": "Auto Cleanup Interval"
         },
+        "clearOnExit": {
+          "description": "Delete all history (including favorites, pinned items, and image files) when the app exits. Suited to shared computers and privacy-sensitive use.",
+          "title": "Clear History on Exit"
+        },
         "maxCount": {
           "description": "When the limit is exceeded, older regular records are cleaned automatically; favorites and pinned items are always kept. 0 means unlimited items.",
           "title": "Maximum Items"
@@ -404,6 +408,13 @@
           "controlLabel": "Clean Cache",
           "description": "Remove image, thumbnail, and icon cache files no longer referenced by history.",
           "title": "Clean Cache"
+        },
+        "compactDatabase": {
+          "confirmContent": "Compacting rebuilds the database file to reclaim space left by deleted records. The app may be briefly unresponsive and needs temporary disk space roughly equal to the database size.",
+          "confirmTitle": "Compact Database",
+          "controlLabel": "Compact Database",
+          "description": "Rebuild the database file to reclaim disk space left by deleted records and shrink the WAL.",
+          "title": "Compact Database"
         },
         "dataDirectory": {
           "controlLabel": "Open",

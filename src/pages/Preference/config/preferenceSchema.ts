@@ -186,6 +186,15 @@ export const preferenceTabs: PreferenceTab[] = [
               return settings.clipboard.history.cleanupIntervalHours;
             },
           },
+          {
+            control: { type: "switch" },
+            id: "history.clearOnExit",
+            keywords: ["clear", "exit", "quit", "privacy"],
+            path: ["clipboard", "history", "clearOnExit"],
+            value: (settings) => {
+              return settings.clipboard.history.clearOnExit;
+            },
+          },
         ],
       },
       {
@@ -785,6 +794,11 @@ export const preferenceTabs: PreferenceTab[] = [
             control: { type: "action" },
             id: "localData.cleanCache",
             keywords: ["cache", "clean", "storage"],
+          },
+          {
+            control: { type: "action" },
+            id: "localData.compactDatabase",
+            keywords: ["compact", "vacuum", "database", "storage", "sqlite"],
           },
         ],
       },

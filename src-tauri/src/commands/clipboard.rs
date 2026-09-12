@@ -601,6 +601,7 @@ fn settings_file_entry_limit(app: &AppHandle) -> usize {
 /// 对列表视图条目补齐前端渲染所需的全量派生字段（缩略图 / 应用图标 / 文件条目 /
 /// 色值预览 / 时间展示 / 脱敏 / 右键动作）。`get_clipboard_item` 与
 /// `update_clipboard_item_text` 共用，保证事件刷新与编辑回填拿到同构 payload。
+/// 设置只取一次快照（含排除判定与脱敏开关），避免每条 enrich 深拷贝整个 Settings。
 async fn enrich_list_item(
     app: &AppHandle,
     file_icons: &mut FileIconCache<'_>,
@@ -608,13 +609,9 @@ async fn enrich_list_item(
     app_icon_store: &AppIconStore,
     item: &mut ClipboardItem,
 ) -> Result<()> {
-    let file_entry_limit = settings_file_entry_limit(app);
-    let redact_sensitive = app
-        .state::<SettingsStore>()
-        .snapshot()
-        .clipboard
-        .sensitive
-        .redact_secrets;
+    let settings = app.state::<SettingsStore>().snapshot();
+    let file_entry_limit = settings.clipboard.display.file_entry_limit();
+    let redact_sensitive = settings.clipboard.sensitive.redact_secrets;
     attach_image_thumbnail_path(image_store, item).await?;
     attach_source_app_icon_path(app_icon_store, item);
     attach_file_entries(file_icons, item, file_entry_limit).await?;
@@ -1519,6 +1516,14 @@ pub async fn delete_clipboard_items(
         }
     }
 
+    // 批量删除同样 checkpoint 收缩 WAL。
+    if let Err(err) = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(&pool)
+        .await
+    {
+        log::warn!("wal checkpoint after batch delete failed: {err}");
+    }
+
     if let Err(err) = app.emit(
         CLIPBOARD_UPDATED_EVENT,
         serde_json::json!({
@@ -1547,6 +1552,14 @@ pub async fn clear_clipboard_items(
         if let Err(err) = store.remove(file_name) {
             log::warn!("remove cleared image {file_name} failed: {err}");
         }
+    }
+
+    // 清空属大批量 DELETE：checkpoint 收缩 WAL，磁盘占用与页缓存立即回落。
+    if let Err(err) = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(&pool)
+        .await
+    {
+        log::warn!("wal checkpoint after clear failed: {err}");
     }
 
     if let Err(err) = app.emit(

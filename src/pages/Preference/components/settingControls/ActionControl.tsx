@@ -12,6 +12,7 @@ import {
   type CleanCacheResult,
   changeStorageLocation,
   cleanResourceCache,
+  compactDatabase,
   type ExportHistoryBackupResult,
   getWindowLifecycleSnapshot,
   inspectHistoryBackup,
@@ -43,6 +44,7 @@ const BACKUP_EXTENSION = "ecopastebak";
 const ABOUT_CHECK_UPDATES_SETTING_ID = "about.checkUpdates";
 const ABOUT_GITHUB_SETTING_ID = "about.github";
 const CLEAN_CACHE_SETTING_ID = "localData.cleanCache";
+const COMPACT_DATABASE_SETTING_ID = "localData.compactDatabase";
 const CUSTOM_GROUPS_SETTING_ID = "organizing.customGroups";
 const DATA_DIRECTORY_SETTING_ID = "localData.dataDirectory";
 const EXPORT_BACKUP_SETTING_ID = "backup.exportHistory";
@@ -147,6 +149,16 @@ const ActionControl: FC<ActionControlProps> = (props) => {
     }
   };
 
+  const compactDb = async () => {
+    setLoading(true);
+    try {
+      await runWithKeepalive("compact-database", compactDatabase);
+      markActionComplete();
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const resetPreferenceSettings = async () => {
     setLoading(true);
     try {
@@ -203,6 +215,23 @@ const ActionControl: FC<ActionControlProps> = (props) => {
       ),
       onOk: cleanCache,
       title: t("preferences:schema.settings.localData.cleanCache.confirmTitle"),
+    });
+  };
+
+  const confirmCompactDatabase = () => {
+    getModalApi().confirm({
+      cancelText: t("common:actions.cancel"),
+      centered: true,
+      content: t(
+        "preferences:schema.settings.localData.compactDatabase.confirmContent",
+      ),
+      okText: t(
+        "preferences:schema.settings.localData.compactDatabase.controlLabel",
+      ),
+      onOk: compactDb,
+      title: t(
+        "preferences:schema.settings.localData.compactDatabase.confirmTitle",
+      ),
     });
   };
 
@@ -372,6 +401,11 @@ const ActionControl: FC<ActionControlProps> = (props) => {
 
     if (setting.id === CLEAN_CACHE_SETTING_ID) {
       confirmCleanCache();
+      return;
+    }
+
+    if (setting.id === COMPACT_DATABASE_SETTING_ID) {
+      confirmCompactDatabase();
       return;
     }
 

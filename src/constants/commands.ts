@@ -11,6 +11,7 @@ export const TAURI_COMMAND = {
   CLEAN_RESOURCE_CACHE: "clean_resource_cache",
   CLEAR_CLIPBOARD_ITEMS: "clear_clipboard_items",
   CLOSE_CLIPBOARD_PREVIEW: "close_clipboard_preview",
+  COMPACT_DATABASE: "compact_database",
   CREATE_CLIPBOARD_GROUP: "create_clipboard_group",
   DELETE_CLIPBOARD_GROUP: "delete_clipboard_group",
   DELETE_CLIPBOARD_ITEM: "delete_clipboard_item",

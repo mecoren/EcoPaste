@@ -388,6 +388,10 @@
           "description": "每隔指定小时检查并清理一次历史记录，0 表示关闭周期性清理；应用启动时仍会清理一次。",
           "title": "自动清理周期"
         },
+        "clearOnExit": {
+          "description": "退出应用时删除全部历史记录（含收藏、置顶和图片文件），适合公用电脑等隐私敏感场景。",
+          "title": "退出时清空历史"
+        },
         "maxCount": {
           "description": "超过上限后，自动清理较旧的普通记录；收藏和置顶始终保留，0 表示不限数量。",
           "title": "最大保留条数"
@@ -404,6 +408,13 @@
           "controlLabel": "清理缓存",
           "description": "移除不再被历史记录引用的图片、缩略图和图标缓存。",
           "title": "清理缓存"
+        },
+        "compactDatabase": {
+          "confirmContent": "压缩会重建数据库文件以回收删除记录留下的空洞，期间应用可能短暂无响应，需要约等于数据库大小的临时磁盘空间。",
+          "confirmTitle": "压缩数据库",
+          "controlLabel": "压缩数据库",
+          "description": "重建数据库文件，回收删除记录留下的磁盘空洞并收缩 WAL。",
+          "title": "压缩数据库"
         },
         "dataDirectory": {
           "controlLabel": "打开",

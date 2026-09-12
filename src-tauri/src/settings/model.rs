@@ -510,6 +510,8 @@ pub struct History {
     pub max_count: u32,
     /// 自动清理周期（小时）。`0` = 关闭周期清理，但启动时仍清理一次。
     pub cleanup_interval_hours: u32,
+    /// 退出应用时清空全部历史（含收藏 / 置顶与图片文件），下次启动从空历史开始。
+    pub clear_on_exit: bool,
 }
 
 /// 历史保留时长。`unit = Forever` 时忽略 `value`。

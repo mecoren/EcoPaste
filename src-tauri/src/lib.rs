@@ -176,6 +176,7 @@ pub fn run() {
             commands::change_storage_location,
             commands::reset_storage_location,
             commands::clean_resource_cache,
+            commands::compact_database,
             commands::open_preference_directory,
             commands::get_autostart,
             commands::set_autostart,
@@ -330,11 +331,41 @@ pub fn run() {
                 }
             }
 
-            // 退出前保存所有窗口几何，兜住「调整大小后不关窗直接退出」的场景。
+            // 退出前保存所有窗口几何，兜住「调整大小后不关窗直接退出」的场景；
+            // 开启「退出时清空历史」时同步清库删图（复用 clear 语义，含图片落盘文件）。
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 window::save_all_window_states(app_handle);
+                clear_history_on_exit(app_handle);
             }
         });
+}
+
+/// 「退出时清空历史」钩子：同步执行（退出路径没有并发任务争抢），失败仅记日志
+/// ——清库失败不应阻断退出，残留历史最坏是下次启动仍可见。
+fn clear_history_on_exit(app: &tauri::AppHandle) {
+    let settings = app.state::<settings::SettingsStore>().snapshot();
+    if !settings.clipboard.history.clear_on_exit {
+        return;
+    }
+
+    let result = tauri::async_runtime::block_on(async move {
+        let pool = app.state::<db::DatabaseState>().pool().await;
+        let outcome = db::items::clear_items(&pool, true, true).await?;
+
+        let image_store = app.state::<clipboard::ImageStore>();
+        for file_name in &outcome.image_files {
+            if let Err(err) = image_store.remove(file_name) {
+                log::warn!("clear-on-exit remove image {file_name} failed: {err}");
+            }
+        }
+
+        log::info!("clear on exit removed {} items", outcome.removed);
+        crate::core::Result::Ok(())
+    });
+
+    if let Err(err) = result {
+        log::warn!("clear history on exit failed: {err}");
+    }
 }
 
 fn show_default_foreground_window(app_handle: &tauri::AppHandle) -> core::Result<()> {

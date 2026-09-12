@@ -139,6 +139,7 @@ export interface History {
   retention: Retention;
   maxCount: number;
   cleanupIntervalHours: number;
+  clearOnExit: boolean;
 }
 
 export interface Search {

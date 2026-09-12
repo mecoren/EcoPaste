@@ -63,12 +63,61 @@ pub async fn get_storage_location(app: AppHandle) -> Result<StorageLocation> {
 }
 
 /// 统计当前 `env_dir()` 数据目录的递归总占用，并拆分常见分项供侧栏展示。
+/// 单次顶层遍历按子目录分流累加，避免对同一棵目录树重复 walk 4 次。
 #[tauri::command]
 pub async fn get_storage_usage(app: AppHandle) -> Result<StorageUsage> {
-    let total_bytes = dir_size(&crate::core::paths::app_data_dir(&app)?)?;
-    let database_bytes = database_bytes(&app)?;
-    let resources_bytes = dir_size(&crate::core::paths::resources_dir(&app)?)?;
-    let settings_bytes = settings_bytes(&app)?;
+    let data_dir = crate::core::paths::app_data_dir(&app)?;
+    let resources_dir = crate::core::paths::resources_dir(&app)?;
+    let db_dir = crate::db::db_path(&app)?
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    let settings_dir = crate::core::paths::config_dir(&app)?;
+
+    let mut total_bytes = 0;
+    let mut database_bytes = 0;
+    let mut resources_bytes = 0;
+    let mut settings_bytes = 0;
+
+    for entry in fs::read_dir(&data_dir)
+        .with_context(|| format!("failed to read directory at {data_dir:?}"))?
+    {
+        let entry = entry.with_context(|| format!("failed to read entry under {data_dir:?}"))?;
+        let entry_path = entry.path();
+        let metadata = entry
+            .metadata()
+            .with_context(|| format!("failed to read metadata at {entry_path:?}"))?;
+
+        if metadata.is_dir() {
+            if entry_path == resources_dir {
+                let size = dir_size(&entry_path)?;
+                resources_bytes += size;
+                total_bytes += size;
+            } else if entry_path == db_dir {
+                let size = dir_size(&entry_path)?;
+                database_bytes += size;
+                total_bytes += size;
+            } else if entry_path == settings_dir {
+                let size = dir_size(&entry_path)?;
+                settings_bytes += size;
+                total_bytes += size;
+            } else {
+                total_bytes += dir_size(&entry_path)?;
+            }
+            continue;
+        }
+
+        total_bytes += metadata.len();
+    }
+
+    // DB 的 WAL / SHM sidecar 与 DB 主文件同目录（db_dir 已覆盖）；若 db 路径
+    // 落在数据目录之外（理论上不会），仍单独补齐主文件占用。
+    if !data_dir.join("db").exists() {
+        let db_main = crate::db::db_path(&app)?;
+        let main_size = file_size(&db_main)?;
+        database_bytes += main_size;
+        total_bytes += main_size;
+    }
 
     Ok(StorageUsage {
         total_bytes,
@@ -97,6 +146,31 @@ pub async fn reset_storage_location(
 ) -> Result<ChangeStorageLocationResult> {
     let target = crate::core::paths::default_data_dir(&app)?;
     switch_storage_location(app, db.inner(), target).await
+}
+
+/// 压缩数据库（设置页「数据」区手动触发）：先 checkpoint 收缩 WAL，再 VACUUM
+/// 重建 DB 文件回收 DELETE 留下的空洞。VACUUM 需要约等于 DB 大小的临时磁盘，
+/// 执行期间持池锁；返回压缩后的数据库字节数供前端刷新展示。
+#[tauri::command]
+pub async fn compact_database(app: AppHandle, db: tauri::State<'_, DatabaseState>) -> Result<u64> {
+    let pool = db.pool().await;
+
+    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(&pool)
+        .await
+        .context("failed to truncate wal before vacuum")?;
+
+    sqlx::query("VACUUM")
+        .execute(&pool)
+        .await
+        .context("failed to vacuum database")?;
+
+    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(&pool)
+        .await
+        .context("failed to truncate wal after vacuum")?;
+
+    database_bytes(&app)
 }
 
 /// 删除资源目录中不再被历史记录或资源索引引用的文件。
@@ -534,13 +608,6 @@ fn remove_unreferenced_file(
 /// 尽力删除空目录；非空、缺失或无权限时由文件清理主流程处理即可。
 fn remove_dir_if_empty(path: &Path) {
     let _ = fs::remove_dir(path);
-}
-
-/// 统计设置主文件大小。
-fn settings_bytes(app: &AppHandle) -> Result<u64> {
-    let settings_path = crate::core::paths::config_dir(app)?.join("settings.json");
-
-    file_size(&settings_path)
 }
 
 /// 文件不存在时按 0 处理，避免首次启动时显示错误状态。
