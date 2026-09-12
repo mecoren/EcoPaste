@@ -247,9 +247,10 @@ pub struct UpdateTextOutcome {
 
 /// 就地更新文本条目的内容（Ditto 式 edit entry）。
 ///
-/// 单条 UPDATE 同时重写派生字段：`content_hash`（重算指纹）、`search_text`、
-/// `summary`（ingest 同款截断）、`sub_kind`（按新文本重新识别，富文本条目保存后
-/// 即为纯文本语义）、`size`（UTF-8 字节数）。FTS 同步由既有
+/// 单条 UPDATE 同时重写派生字段：`content_hash`（重算指纹）、`summary`
+/// （ingest 同款截断）、`sub_kind`（按新文本重新识别，富文本条目保存后即为
+/// 纯文本语义）、`size`（UTF-8 字节数）；`search_text` 置 NULL（与 ingest 的
+/// 纯文本路径一致，FTS 触发器 COALESCE 到 content）。FTS 同步由既有
 /// `clipboard_items_au` AFTER UPDATE 触发器自动完成——正因如此编辑必须走
 /// UPDATE 而非 DELETE+INSERT。
 ///
@@ -262,19 +263,18 @@ pub async fn update_item_text(
     content: &str,
 ) -> Result<UpdateTextOutcome> {
     let hash = content_hash(ClipboardKind::Text, content);
-    let search_text = content.trim();
-    let summary = crate::clipboard::make_summary(search_text);
-    let sub_kind = crate::clipboard::detect_text_sub_kind(search_text);
+    let trimmed = content.trim();
+    let summary = crate::clipboard::make_summary(trimmed);
+    let sub_kind = crate::clipboard::detect_text_sub_kind(trimmed);
     let size = content.len() as i64;
 
     let result = sqlx::query(
         "UPDATE clipboard_items \
-         SET content = ?, content_hash = ?, search_text = ?, summary = ?, sub_kind = ?, size = ? \
+         SET content = ?, content_hash = ?, search_text = NULL, summary = ?, sub_kind = ?, size = ? \
          WHERE id = ?",
     )
     .bind(content)
     .bind(&hash)
-    .bind(search_text)
     .bind(summary)
     .bind(sub_kind)
     .bind(size)
@@ -593,9 +593,10 @@ fn push_filter_clauses(
         }
         KeywordFilter::Like(kw) => {
             // FTS 索引覆盖 search_text / note 两列，LIKE 兜底也跟齐，
-            // 让 1–2 字符短词的命中范围与长词一致。
+            // 让 1–2 字符短词的命中范围与长词一致。纯文本条目 search_text
+            // 为 NULL（双写已消除），与触发器同款 COALESCE 到 content。
             let pattern = format!("%{kw}%");
-            qb.push(" AND (clipboard_items.search_text LIKE ")
+            qb.push(" AND (COALESCE(clipboard_items.search_text, clipboard_items.content) LIKE ")
                 .push_bind(pattern.clone())
                 .push(" ESCAPE '\\' OR clipboard_items.note LIKE ")
                 .push_bind(pattern)
@@ -1055,7 +1056,12 @@ mod tests {
         let mut c = sample_item("c");
         c.content = "plain".to_owned();
         c.note = Some("annotated".to_owned());
-        for item in [&a, &b, &c] {
+        // 纯文本双写消除后的入库形态：search_text = NULL，索引由触发器
+        // COALESCE 到 content——NULL 路径必须同样可被全文搜到。
+        let mut d = sample_item("d");
+        d.content = "nullable searchtext content".to_owned();
+        d.search_text = None;
+        for item in [&a, &b, &c, &d] {
             insert_item(&pool, item).await.unwrap();
         }
 
@@ -1074,6 +1080,16 @@ mod tests {
         assert_eq!(
             ids(&query_items(&pool, &search("annot")).await.unwrap()),
             ["c"]
+        );
+        // NULL search_text 条目经 COALESCE 命中 content 全文。
+        assert_eq!(
+            ids(&query_items(&pool, &search("nullable")).await.unwrap()),
+            ["d"]
+        );
+        // 短词 LIKE 兜底同样 COALESCE 到 content。
+        assert_eq!(
+            ids(&query_items(&pool, &search("nu")).await.unwrap()),
+            ["d"]
         );
         assert!(query_items(&pool, &search("zzz")).await.unwrap().is_empty());
     }
@@ -1245,7 +1261,9 @@ mod tests {
 
         let after = find_item_by_id(&pool, "a").await.unwrap().unwrap();
         assert_eq!(after.content, "https://eco-paste.app");
-        assert_eq!(after.search_text.as_deref(), Some("https://eco-paste.app"));
+        // 编辑后与 ingest 纯文本路径一致：search_text 置 NULL，FTS 由触发器
+        // COALESCE 到 content。
+        assert_eq!(after.search_text, None);
         assert_eq!(after.summary.as_deref(), Some("https://eco-paste.app"));
         assert_eq!(after.sub_kind, Some(ClipboardSubKind::Url));
         assert_eq!(

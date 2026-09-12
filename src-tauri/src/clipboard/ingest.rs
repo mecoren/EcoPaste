@@ -75,7 +75,8 @@ fn files_to_content(files: &[String]) -> String {
 /// - 两者的 `search_text` 都直接用 OS 同时提供的纯文本（`get_text()`）——
 ///   复制富文本时剪贴板本就并存纯文本表示，无需自己解析 HTML/RTF；
 /// - plain：被顺序选中时，`content` = 纯文本，`sub_kind` = url/email/color/path 识别，
-///   `search_text` 与 content 同串（统一由 FTS 索引 search_text）。
+///   `search_text` 存 `None`（与 content 同串的双写已消除，FTS 索引在触发器里
+///   COALESCE 到 content，见 migration 0004）。
 ///
 /// 一律以 trim 后的纯文本作为「是否有可展示内容」的判据：纯文本为空就直接 `None`，
 /// 不管 HTML/RTF 源是否存在（只有样式/空白节点的源对用户没意义，列表也渲染不出来）。
@@ -133,7 +134,7 @@ fn draft_from_text(text: &TextPayload, capture: &Capture, plain_only: bool) -> O
                     }
                 }
                 CaptureKind::Text => {
-                    return Some(draft_plain_text(plain, plain_search, summary));
+                    return Some(draft_plain_text(plain, summary));
                 }
                 CaptureKind::Files | CaptureKind::Image => {}
             }
@@ -146,16 +147,18 @@ fn draft_from_text(text: &TextPayload, capture: &Capture, plain_only: bool) -> O
         return None;
     }
 
-    Some(draft_plain_text(plain, plain_search, summary))
+    Some(draft_plain_text(plain, summary))
 }
 
 /// 根据纯文本表示生成文本草稿，并执行 URL / 邮箱 / 色值 / 路径子类型识别。
-fn draft_plain_text(plain: &str, plain_search: Option<String>, summary: Option<String>) -> Draft {
+/// `search_text` 恒为 `None`：与 `content` 同串的双写已消除，FTS 触发器用
+/// `COALESCE(search_text, content)` 索引原文本（见 migration 0004）。
+fn draft_plain_text(plain: &str, summary: Option<String>) -> Draft {
     Draft {
         kind: ClipboardKind::Text,
         sub_kind: detect_text_sub_kind(plain),
         content: plain.to_owned(),
-        search_text: plain_search,
+        search_text: None,
         summary,
         file_types: None,
         width: None,
@@ -365,7 +368,9 @@ mod tests {
         assert_eq!(item.kind, ClipboardKind::Text);
         assert_eq!(item.sub_kind, Some(ClipboardSubKind::Url));
         assert_eq!(item.content, "https://example.com");
-        assert_eq!(item.search_text.as_deref(), Some("https://example.com"));
+        // 纯文本条目 search_text 与 content 同串：不再双写，存 None 由
+        // FTS 触发器 COALESCE 到 content（省约一半行存储）。
+        assert_eq!(item.search_text, None);
         assert_eq!(item.size, Some(19));
     }
 
@@ -400,7 +405,8 @@ mod tests {
 
         assert_eq!(item.sub_kind, None);
         assert_eq!(item.content, "Hello World");
-        assert_eq!(item.search_text.as_deref(), Some("Hello World"));
+        // 纯文本模式（plain_only）落库同样走 search_text = None 的去重写路径。
+        assert_eq!(item.search_text, None);
         assert_eq!(item.summary.as_deref(), Some("Hello World"));
     }
 
