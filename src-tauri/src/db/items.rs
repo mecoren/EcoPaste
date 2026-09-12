@@ -1006,6 +1006,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn note_change_still_rebuilds_fts_index() {
+        let pool = memory_pool().await;
+        let mut item = sample_item("a");
+        item.content = "plain".to_owned();
+        item.search_text = Some("plain".to_owned());
+        insert_item(&pool, &item).await.unwrap();
+
+        // note 是 FTS 索引列：写备注后必须能搜到。
+        update_item_note(&pool, "a", Some("annotated marker"))
+            .await
+            .unwrap();
+        let search = |kw: &str| ClipboardItemQuery {
+            keyword: Some(kw.to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(
+            ids(&query_items(&pool, &search("annotated")).await.unwrap()),
+            ["a"]
+        );
+    }
+
+    #[tokio::test]
     async fn search_fts_matches_prefix_across_columns() {
         let pool = memory_pool().await;
         let mut a = sample_item("a");
@@ -1038,6 +1060,72 @@ mod tests {
             ["c"]
         );
         assert!(query_items(&pool, &search("zzz")).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn metadata_updates_do_not_rewrite_fts_index() {
+        let pool = memory_pool().await;
+        // 多行同 token：FTS 索引跨多个 segment，元数据 UPDATE 触发重建时
+        // 每次 delete+insert 都会追加新 segment 数据，页数随之增长；
+        // 条件化触发器（只在值变化时重建）下，50 次纯元数据 UPDATE 页数不变。
+        for i in 0..20 {
+            let mut item = sample_item(&format!("item{i}"));
+            item.content = format!("hello rustacean number {i}");
+            item.search_text = Some(item.content.clone());
+            insert_item(&pool, &item).await.unwrap();
+        }
+
+        async fn page_count(pool: &SqlitePool) -> i64 {
+            sqlx::query_scalar::<_, i64>("PRAGMA page_count")
+                .fetch_one(pool)
+                .await
+                .unwrap()
+        }
+        let before = page_count(&pool).await;
+
+        for _ in 0..50 {
+            increment_item_use_count(&pool, "item5").await.unwrap();
+        }
+        toggle_item_favorite(&pool, "item5").await.unwrap();
+        toggle_item_pinned(&pool, "item5").await.unwrap();
+        update_item_group(&pool, "item5", None).await.unwrap();
+
+        let after = page_count(&pool).await;
+        assert_eq!(
+            before, after,
+            "metadata-only UPDATE must not rewrite the FTS index (pages grew: {before} -> {after})"
+        );
+
+        // 索引未被破坏：原关键词仍命中。
+        let search = ClipboardItemQuery {
+            keyword: Some("rustacean".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(query_items(&pool, &search).await.unwrap().len(), 20);
+    }
+
+    #[tokio::test]
+    async fn edit_text_still_rebuilds_fts_index() {
+        let pool = memory_pool().await;
+        let mut item = sample_item("a");
+        item.content = "hello rustacean".to_owned();
+        item.search_text = Some("hello rustacean".to_owned());
+        insert_item(&pool, &item).await.unwrap();
+
+        update_item_text(&pool, "a", "goodbye world").await.unwrap();
+
+        let search = |kw: &str| ClipboardItemQuery {
+            keyword: Some(kw.to_owned()),
+            ..Default::default()
+        };
+        assert!(query_items(&pool, &search("rust"))
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            ids(&query_items(&pool, &search("goodbye")).await.unwrap()),
+            ["a"]
+        );
     }
 
     #[tokio::test]
