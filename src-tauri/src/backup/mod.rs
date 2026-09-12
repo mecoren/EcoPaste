@@ -17,7 +17,7 @@ use chrono::{DateTime, Utc};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-use sqlx::{Sqlite, SqlitePool};
+use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 use tauri::{AppHandle, Emitter, Manager};
 use tempfile::{NamedTempFile, TempDir};
 use walkdir::WalkDir;
@@ -1178,60 +1178,82 @@ async fn merge_items(
     .await
     .context("failed to read backup items")?;
 
-    let mut imported_items = 0;
-    let mut skipped_items = 0;
-    for row in rows {
-        let exists: Option<i64> = sqlx::query_scalar(
-            "SELECT 1 FROM clipboard_items WHERE kind = ? AND content_hash = ? LIMIT 1",
-        )
-        .bind(row.kind.as_str())
-        .bind(row.content_hash.as_str())
-        .fetch_optional(&mut **tx)
-        .await
-        .context("failed to check duplicate item")?;
-        if exists.is_some() {
-            skipped_items += 1;
-            continue;
-        }
+    // 查重集合一次拉取到内存（kind + content_hash 与 upsert_item 同语义），
+    // 替代旧实现的逐行 SELECT——万条历史从 ~2N 次 DB 往返降到 1 次。
+    let existing: std::collections::HashSet<(String, String)> =
+        sqlx::query_as::<_, (String, String)>("SELECT kind, content_hash FROM clipboard_items")
+            .fetch_all(&mut **tx)
+            .await
+            .context("failed to read existing item hashes")?
+            .into_iter()
+            .collect();
 
-        sqlx::query(
-            "INSERT OR IGNORE INTO clipboard_items \
-             (id, kind, sub_kind, group_id, source_app_id, content, content_hash, search_text, \
-              summary, file_types, size, width, height, use_count, is_favorite, is_pinned, is_sensitive, platform, note, \
-              created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(row.id)
-        .bind(row.kind)
-        .bind(row.sub_kind)
-        .bind(row.group_id)
-        .bind(row.source_app_id)
-        .bind(row.content)
-        .bind(row.content_hash)
-        .bind(row.search_text)
-        .bind(row.summary)
-        .bind(row.file_types)
-        .bind(row.size)
-        .bind(row.width)
-        .bind(row.height)
-        .bind(row.use_count)
-        .bind(row.is_favorite)
-        .bind(row.is_pinned)
-        .bind(row.is_sensitive)
-        .bind(row.platform)
-        .bind(row.note)
-        .bind(row.created_at)
-        .bind(row.updated_at)
-        .execute(&mut **tx)
-        .await
-        .context("failed to import item")?;
-        imported_items += 1;
-    }
+    let pending: Vec<&BackupItemRow> = rows
+        .iter()
+        .filter(|row| !existing.contains(&(row.kind.clone(), row.content_hash.clone())))
+        .collect();
+
+    let skipped_items = (rows.len() - pending.len()) as u64;
+    let imported_items = insert_items_in_chunks(tx, &pending).await? as u64;
 
     Ok(MergeOutcome {
         imported_items,
         skipped_items,
     })
+}
+
+/// 分块批量插入：单条多值 `INSERT OR IGNORE` 每块最多 500 行，
+/// 21 列 × 500 行 = 10500 绑定参数，低于 SQLite 32766 上限。
+const MERGE_INSERT_CHUNK: usize = 500;
+
+async fn insert_items_in_chunks(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    pending: &[&BackupItemRow],
+) -> Result<usize> {
+    let mut imported = 0;
+
+    for chunk in pending.chunks(MERGE_INSERT_CHUNK) {
+        let mut qb = QueryBuilder::new(
+            "INSERT OR IGNORE INTO clipboard_items \
+             (id, kind, sub_kind, group_id, source_app_id, content, content_hash, search_text, \
+              summary, file_types, size, width, height, use_count, is_favorite, is_pinned, is_sensitive, platform, note, \
+              created_at, updated_at) ",
+        );
+
+        qb.push_values(chunk, |mut builder, row| {
+            builder
+                .push_bind(row.id.clone())
+                .push_bind(row.kind.clone())
+                .push_bind(row.sub_kind.clone())
+                .push_bind(row.group_id.clone())
+                .push_bind(row.source_app_id.clone())
+                .push_bind(row.content.clone())
+                .push_bind(row.content_hash.clone())
+                .push_bind(row.search_text.clone())
+                .push_bind(row.summary.clone())
+                .push_bind(row.file_types.clone())
+                .push_bind(row.size)
+                .push_bind(row.width)
+                .push_bind(row.height)
+                .push_bind(row.use_count)
+                .push_bind(row.is_favorite)
+                .push_bind(row.is_pinned)
+                .push_bind(row.is_sensitive)
+                .push_bind(row.platform.clone())
+                .push_bind(row.note.clone())
+                .push_bind(row.created_at)
+                .push_bind(row.updated_at);
+        });
+
+        let result = qb
+            .build()
+            .execute(&mut **tx)
+            .await
+            .context("failed to import items chunk")?;
+        imported += result.rows_affected() as usize;
+    }
+
+    Ok(imported)
 }
 
 #[derive(sqlx::FromRow)]
