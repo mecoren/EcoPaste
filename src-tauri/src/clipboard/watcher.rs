@@ -272,29 +272,25 @@ impl ClipboardHandler for ClipboardChangeHandler {
 
         // 用户在偏好里勾选了「过滤此应用」时，本次复制整条直接丢弃——不读取、不入库、不 emit。
         // 提前到读 payload 前判定，省掉无效的 OS 调用 + 图片解码开销。
-        if let Some(src) = &source {
-            let excluded = self
-                .app
-                .try_state::<SettingsStore>()
-                .map(|s| {
-                    s.snapshot()
-                        .clipboard
-                        .filters
-                        .excluded_app_ids
-                        .iter()
-                        .any(|id| id == &src.id)
-                })
-                .unwrap_or(false);
-            if excluded {
-                return;
-            }
-        }
-
+        // 快照只取一次：排除名单判定与下方 capture / sensitive 读取共用，
+        // 避免每次复制对 Vec 密集的 Settings 结构做两遍深拷贝。
         let settings = self
             .app
             .try_state::<SettingsStore>()
             .map(|s| s.snapshot())
             .unwrap_or_default();
+
+        if let Some(src) = &source {
+            if settings
+                .clipboard
+                .filters
+                .excluded_app_ids
+                .iter()
+                .any(|id| id == &src.id)
+            {
+                return;
+            }
+        }
 
         // 同步读取 + 转换（含图片落盘）：拿到 content_hash 才能判定是否为自身写回。
         let payload = match read_with_retry(&CLIPBOARD_READ_RETRY_DELAYS, || {

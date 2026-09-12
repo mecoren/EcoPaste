@@ -2,6 +2,8 @@
 //!
 //! cache_key 生成规则见 `clipboard::icon::get_icon_cache_key`。
 
+use std::collections::HashMap;
+
 use chrono::Utc;
 use sqlx::SqlitePool;
 
@@ -26,6 +28,41 @@ pub async fn get_icon(
         anyhow::anyhow!("{e}")
     })?;
     Ok(row.map(|r| r.0))
+}
+
+/// 批量查询一组 cache_key 的 icon 文件名，返回 `cache_key -> icon_file` 映射。
+/// `cache_keys` 为空时不发查询。供列表 / 预览条目组装时一次取整页图标，
+/// 消除逐路径单查的 N+1 往返。
+pub async fn get_icons(
+    pool: &SqlitePool,
+    cache_keys: &[String],
+    platform: Platform,
+) -> Result<HashMap<String, String>> {
+    if cache_keys.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut qb: sqlx::QueryBuilder<sqlx::Sqlite> = sqlx::QueryBuilder::new(
+        "SELECT cache_key, icon_file FROM file_type_icons WHERE platform = ",
+    );
+    qb.push_bind(platform);
+    qb.push(" AND cache_key IN (");
+    let mut separated = qb.separated(", ");
+    for key in cache_keys {
+        separated.push_bind(key);
+    }
+    qb.push(")");
+
+    let rows = qb
+        .build_query_as::<(String, String)>()
+        .fetch_all(pool)
+        .await
+        .map_err(|e| {
+            log::error!("query file_type_icons batch failed: {e}");
+            anyhow::anyhow!("{e}")
+        })?;
+
+    Ok(rows.into_iter().collect())
 }
 
 /// upsert：插入或更新 icon 记录。

@@ -311,9 +311,10 @@ pub async fn get_file_icon_path(
     index: usize,
 ) -> Result<FileIconResult> {
     let pool = db.pool().await;
-    let (icon_path, exists) =
-        resolve_file_icon_path(&pool, &file_icon_store, &path, file_types.as_deref(), index)
-            .await?;
+    let mut file_icons = FileIconCache::new(&pool, &file_icon_store);
+    let (icon_path, exists) = file_icons
+        .resolve(&path, file_types.as_deref(), index)
+        .await?;
 
     Ok(FileIconResult { icon_path, exists })
 }
@@ -539,10 +540,13 @@ pub async fn list_clipboard_items(
     let settings = app.state::<SettingsStore>().snapshot();
     let file_entry_limit = settings.clipboard.display.file_entry_limit();
     let redact_sensitive = settings.clipboard.sensitive.redact_secrets;
+    // 整页共用一个图标缓存：先批量预取 DB 记录，组装时同 key 不再重复查询。
+    let mut file_icons = FileIconCache::new(&pool, &file_icon_store);
+    file_icons.prefetch(&items, file_entry_limit).await?;
     for item in &mut items {
         attach_image_thumbnail_path(&image_store, item).await?;
         attach_source_app_icon_path(&app_icon_store, item);
-        attach_file_entries(&pool, &file_icon_store, item, file_entry_limit).await?;
+        attach_file_entries(&mut file_icons, item, file_entry_limit).await?;
         attach_color_preview(item);
         attach_display_created_at(item, &now);
         redact_sensitive_list_item(item, redact_sensitive);
@@ -573,17 +577,25 @@ pub async fn get_clipboard_item(
     let pool = db.pool().await;
     let mut item = find_item_for_list_by_id(&pool, &id).await?;
     if let Some(item) = item.as_mut() {
-        enrich_list_item(
-            &app,
-            &pool,
-            &image_store,
-            &app_icon_store,
-            &file_icon_store,
-            item,
-        )
-        .await?;
+        let mut file_icons = FileIconCache::new(&pool, &file_icon_store);
+        file_icons
+            .prefetch(
+                std::slice::from_ref(&*item),
+                settings_file_entry_limit(&app),
+            )
+            .await?;
+        enrich_list_item(&app, &mut file_icons, &image_store, &app_icon_store, item).await?;
     }
     Ok(item)
+}
+
+/// 当前设置下的文件条目展示上限（列表 / 单条视图共用）。
+fn settings_file_entry_limit(app: &AppHandle) -> usize {
+    app.state::<SettingsStore>()
+        .snapshot()
+        .clipboard
+        .display
+        .file_entry_limit()
 }
 
 /// 对列表视图条目补齐前端渲染所需的全量派生字段（缩略图 / 应用图标 / 文件条目 /
@@ -591,18 +603,21 @@ pub async fn get_clipboard_item(
 /// `update_clipboard_item_text` 共用，保证事件刷新与编辑回填拿到同构 payload。
 async fn enrich_list_item(
     app: &AppHandle,
-    pool: &SqlitePool,
+    file_icons: &mut FileIconCache<'_>,
     image_store: &ImageStore,
     app_icon_store: &AppIconStore,
-    file_icon_store: &FileIconStore,
     item: &mut ClipboardItem,
 ) -> Result<()> {
-    let settings = app.state::<SettingsStore>().snapshot();
-    let file_entry_limit = settings.clipboard.display.file_entry_limit();
-    let redact_sensitive = settings.clipboard.sensitive.redact_secrets;
+    let file_entry_limit = settings_file_entry_limit(app);
+    let redact_sensitive = app
+        .state::<SettingsStore>()
+        .snapshot()
+        .clipboard
+        .sensitive
+        .redact_secrets;
     attach_image_thumbnail_path(image_store, item).await?;
     attach_source_app_icon_path(app_icon_store, item);
-    attach_file_entries(pool, file_icon_store, item, file_entry_limit).await?;
+    attach_file_entries(file_icons, item, file_entry_limit).await?;
     attach_color_preview(item);
     attach_display_created_at(item, &Local::now());
     redact_sensitive_list_item(item, redact_sensitive);
@@ -837,12 +852,160 @@ impl Drop for ClipboardAutoHideSuspendGuard {
     }
 }
 
+/// 一批条目共享的文件 icon 解析缓存：批量预取 DB 记录 + 页内去重，
+/// 把逐路径「一次 DB 查询 + 一次 exists()」的 N+1 往返收敛成每页一次批量查询。
+/// 命中 DB 但 icon 文件已丢失（清缓存 / 手动删目录）的 key 会按 miss 重抽并回写。
+pub(crate) struct FileIconCache<'a> {
+    pool: &'a SqlitePool,
+    store: &'a FileIconStore,
+    /// `cache_key -> Some(icon_file)`：DB 命中；`None`：本页已确认 miss（含已删除路径）。
+    entries: HashMap<String, Option<String>>,
+}
+
+impl<'a> FileIconCache<'a> {
+    pub(crate) fn new(pool: &'a SqlitePool, store: &'a FileIconStore) -> Self {
+        Self {
+            pool,
+            store,
+            entries: HashMap::new(),
+        }
+    }
+
+    /// 预取一批列表条目将用到的全部 icon：先算出各自 cache_key（含目录 / 扩展名规则），
+    /// 未命中内存表的 key 一次性 `IN` 批量查 DB。`limit` 与条目组装时的截断保持一致，
+    /// 避免预取根本不会展示的路径。
+    pub(crate) async fn prefetch(&mut self, items: &[ClipboardItem], limit: usize) -> Result<()> {
+        let platform = current_platform();
+        let mut wanted: Vec<String> = Vec::new();
+
+        for item in items {
+            if item.kind != ClipboardKind::Files {
+                continue;
+            }
+
+            for (index, path) in file_paths_of(item, limit).enumerate() {
+                let key = file_icon_cache_key(path, item.file_types.as_deref(), index);
+                if !self.entries.contains_key(&key) {
+                    wanted.push(key);
+                }
+            }
+        }
+
+        wanted.sort_unstable();
+        wanted.dedup();
+
+        let fetched = crate::db::file_icons::get_icons(self.pool, &wanted, platform).await?;
+        for key in wanted {
+            let value = fetched.get(&key).cloned();
+            self.entries.insert(key, value);
+        }
+
+        Ok(())
+    }
+
+    /// 解析单条文件条目的 icon：优先命中页内缓存；DB 命中但文件已丢失时按 miss 处理并回写缓存。
+    /// 返回 `(icon_path, exists)`，`icon_path` 可能为 `None`（抽取失败或路径已删除且无缓存）。
+    async fn resolve(
+        &mut self,
+        path: &str,
+        file_types: Option<&str>,
+        index: usize,
+    ) -> Result<(Option<String>, bool)> {
+        let path_obj = Path::new(path);
+        let exists = path_obj.exists();
+        let cache_key = file_icon_cache_key(path, file_types, index);
+
+        if let Some(cached) = self.entries.get(&cache_key) {
+            if let Some(icon_file) = cached {
+                // DB 命中后还要确认 icon 文件仍在磁盘上：用户清缓存后表里的
+                // <hash>.png 映射就成了死引用，落到前端 convertFileSrc 会 404。
+                let icon_path = self.store.icon_path(icon_file);
+                if icon_path.exists() {
+                    return Ok((icon_path.to_str().map(str::to_owned), exists));
+                }
+            }
+        } else {
+            let platform = current_platform();
+            let icon_file =
+                crate::db::file_icons::get_icon(self.pool, &cache_key, platform).await?;
+            self.entries.insert(cache_key.clone(), icon_file.clone());
+            if let Some(icon_file) = icon_file {
+                let icon_path = self.store.icon_path(&icon_file);
+                if icon_path.exists() {
+                    return Ok((icon_path.to_str().map(str::to_owned), exists));
+                }
+            }
+        }
+
+        if !exists {
+            return Ok((None, false));
+        }
+
+        let path_for_extract = path_obj.to_path_buf();
+        let png_bytes = tauri::async_runtime::spawn_blocking(move || {
+            crate::clipboard::icon_png(&path_for_extract, None)
+        })
+        .await
+        .map_err(|err| AppError::Clipboard(format!("icon extract task join failed: {err}")))?;
+
+        let Some(png) = png_bytes else {
+            return Ok((None, exists));
+        };
+
+        let icon_file = self.store.store(&png)?;
+        crate::db::file_icons::upsert_icon(self.pool, &cache_key, current_platform(), &icon_file)
+            .await?;
+        // 抽取结果回写页内缓存：同 key 的后续条目（多文件同扩展名常见）直接命中。
+        self.entries.insert(cache_key, Some(icon_file.clone()));
+
+        let icon_path = self.store.icon_path(&icon_file);
+        Ok((icon_path.to_str().map(str::to_owned), exists))
+    }
+}
+
+/// 当前平台的固定枚举：本应用只跑在 macOS / Windows 上。
+fn current_platform() -> Platform {
+    if cfg!(target_os = "macos") {
+        Platform::Macos
+    } else {
+        Platform::Windows
+    }
+}
+
+/// 计算文件路径的 icon 缓存 key：目录走哨兵 key；普通路径优先实时判定
+/// （覆盖入库后类型变化），已删除路径按入库时的 file_types 回退。
+fn file_icon_cache_key(path: &str, file_types: Option<&str>, index: usize) -> String {
+    let path_obj = Path::new(path);
+
+    let is_directory = if path_obj.exists() {
+        Some(path_obj.is_dir())
+    } else {
+        file_types
+            .and_then(|types| types.split(',').nth(index))
+            .map(|t| t == "d")
+    };
+
+    if is_directory == Some(true) {
+        crate::clipboard::DIR_CACHE_KEY.to_string()
+    } else {
+        crate::clipboard::get_icon_cache_key(path_obj)
+    }
+}
+
+/// 迭代 files 条目 content 中的前 `limit` 个非空路径。
+fn file_paths_of(item: &ClipboardItem, limit: usize) -> impl Iterator<Item = &str> {
+    item.content
+        .split('\n')
+        .filter(|p| !p.is_empty())
+        .take(limit)
+}
+
 /// 为 files 条目按设置组装前若干项 [`FileEntry`]：
 /// 路径 / 文件名 / 目录标记 / 图片标记 / icon 绝对路径，前端直接渲染。
 /// 非 files 条目或无路径时保持 `file_entries = None`。
+/// icon 解析走页级 [`FileIconCache`]（调用方先 prefetch 批量预取）。
 async fn attach_file_entries(
-    pool: &SqlitePool,
-    store: &FileIconStore,
+    file_icons: &mut FileIconCache<'_>,
     item: &mut ClipboardItem,
     limit: usize,
 ) -> Result<()> {
@@ -850,12 +1013,7 @@ async fn attach_file_entries(
         return Ok(());
     }
 
-    let paths: Vec<&str> = item
-        .content
-        .split('\n')
-        .filter(|p| !p.is_empty())
-        .take(limit)
-        .collect();
+    let paths: Vec<&str> = file_paths_of(item, limit).collect();
     if paths.is_empty() {
         return Ok(());
     }
@@ -869,8 +1027,9 @@ async fn attach_file_entries(
 
     let mut entries = Vec::with_capacity(paths.len());
     for (index, path) in paths.iter().enumerate() {
-        let (icon_path, exists) =
-            resolve_file_icon_path(pool, store, path, item.file_types.as_deref(), index).await?;
+        let (icon_path, exists) = file_icons
+            .resolve(path, item.file_types.as_deref(), index)
+            .await?;
         let is_dir = types.get(index).copied() == Some("d");
         let name = std::path::Path::new(path)
             .file_name()
@@ -925,7 +1084,11 @@ async fn build_clipboard_preview_payload(
         }
         ClipboardKind::Files => {
             total_files = count_file_paths(&item.content);
-            files = build_preview_file_entries(pool, file_icon_store, &item).await?;
+            let mut file_icons = FileIconCache::new(pool, file_icon_store);
+            file_icons
+                .prefetch(std::slice::from_ref(&item), PREVIEW_FILE_ENTRY_LIMIT)
+                .await?;
+            files = build_preview_file_entries(&mut file_icons, &item).await?;
         }
     }
     let preview_sub_kind = preview_sub_kind(&item, redact_sensitive);
@@ -948,9 +1111,9 @@ async fn build_clipboard_preview_payload(
 }
 
 /// 解析 files 类型记录中的路径列表，最多返回前 64 项以控制 IPC 与 icon 抽取成本。
+/// icon 解析走页级 [`FileIconCache`]（调用方先按同上限 prefetch 批量预取）。
 async fn build_preview_file_entries(
-    pool: &SqlitePool,
-    store: &FileIconStore,
+    file_icons: &mut FileIconCache<'_>,
     item: &ClipboardItem,
 ) -> Result<Vec<ClipboardPreviewFileEntry>> {
     let paths: Vec<&str> = item
@@ -962,8 +1125,9 @@ async fn build_preview_file_entries(
 
     let mut entries = Vec::with_capacity(paths.len());
     for (index, path) in paths.iter().enumerate() {
-        let (icon_path, exists) =
-            resolve_file_icon_path(pool, store, path, item.file_types.as_deref(), index).await?;
+        let (icon_path, exists) = file_icons
+            .resolve(path, item.file_types.as_deref(), index)
+            .await?;
         let path_obj = Path::new(path);
         let is_dir = resolve_preview_file_is_dir(path_obj, item.file_types.as_deref(), index);
         let is_image = !is_dir && is_image_path(path);
@@ -1043,65 +1207,6 @@ fn is_image_path(path: &str) -> bool {
             | "heic"
             | "apng"
     )
-}
-
-/// 解析文件 icon 路径：优先命中缓存，未命中时在路径存在的前提下抽取并落盘缓存。
-/// 返回 `(icon_path, exists)`，其中 `icon_path` 可能为 `None`（抽取失败或已删除且无缓存）。
-async fn resolve_file_icon_path(
-    pool: &SqlitePool,
-    file_icon_store: &FileIconStore,
-    path: &str,
-    file_types: Option<&str>,
-    index: usize,
-) -> Result<(Option<String>, bool)> {
-    let path_obj = Path::new(path);
-    let exists = path_obj.exists();
-    let platform = if cfg!(target_os = "macos") {
-        Platform::Macos
-    } else {
-        Platform::Windows
-    };
-
-    let is_directory = file_types
-        .and_then(|types| types.split(',').nth(index))
-        .map(|t| t == "d");
-
-    let cache_key = if is_directory == Some(true) {
-        crate::clipboard::DIR_CACHE_KEY.to_string()
-    } else {
-        // 路径存在时实时判断（覆盖入库后类型变化的情况）；已删除时按扩展名推断。
-        crate::clipboard::get_icon_cache_key(path_obj)
-    };
-
-    // DB 命中后还要确认 icon 文件仍在磁盘上：用户清缓存 / 手动删 file-icons 目录后，
-    // 表里的 <hash>.png 映射就成了死引用，落到前端 convertFileSrc 会 404。缺了就当 miss 重抽。
-    if let Some(icon_file) = crate::db::file_icons::get_icon(pool, &cache_key, platform).await? {
-        let icon_path = file_icon_store.icon_path(&icon_file);
-        if icon_path.exists() {
-            return Ok((icon_path.to_str().map(str::to_owned), exists));
-        }
-    }
-
-    if !exists {
-        return Ok((None, false));
-    }
-
-    let path_for_extract = path_obj.to_path_buf();
-    let png_bytes = tauri::async_runtime::spawn_blocking(move || {
-        crate::clipboard::icon_png(&path_for_extract, None)
-    })
-    .await
-    .map_err(|err| AppError::Clipboard(format!("icon extract task join failed: {err}")))?;
-
-    let Some(png) = png_bytes else {
-        return Ok((None, exists));
-    };
-
-    let icon_file = file_icon_store.store(&png)?;
-    crate::db::file_icons::upsert_icon(pool, &cache_key, platform, &icon_file).await?;
-
-    let icon_path = file_icon_store.icon_path(&icon_file);
-    Ok((icon_path.to_str().map(str::to_owned), exists))
 }
 
 /// 按 id 列表批量取来源应用——前端渲染卡片时一次性补齐图标/名称。
@@ -1494,12 +1599,18 @@ pub async fn update_clipboard_item_text(
     let mut updated = find_item_for_list_by_id(&pool, &id)
         .await?
         .ok_or_else(|| AppError::Clipboard(format!("剪贴板记录不存在：{id}")))?;
+    let mut file_icons = FileIconCache::new(&pool, &file_icon_store);
+    file_icons
+        .prefetch(
+            std::slice::from_ref(&updated),
+            settings_file_entry_limit(&app),
+        )
+        .await?;
     enrich_list_item(
         &app,
-        &pool,
+        &mut file_icons,
         &image_store,
         &app_icon_store,
-        &file_icon_store,
         &mut updated,
     )
     .await?;
