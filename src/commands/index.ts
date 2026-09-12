@@ -1140,6 +1140,69 @@ export const deleteClipboardItem = async (
 };
 
 /**
+ * 批量删除多选条目。与单条删除同套保护 / 确认开关：
+ * 含受保护条目且未开启对应「允许删除」设置时整体放弃（与单条行为一致，不做部分删除）；
+ * 确认弹层展示选中数量。成功后 toast 删除计数。
+ */
+export const deleteClipboardItems = async (
+  items: Array<{ id: string; isFavorite: boolean; isPinned: boolean }>,
+): Promise<boolean> => {
+  if (items.length === 0) return false;
+
+  const contentSettings = settingsState.clipboard?.content;
+  const hasFavorite = items.some((item) => item.isFavorite);
+  const hasPinned = items.some((item) => item.isPinned);
+
+  if (hasFavorite && !(contentSettings?.deleteFavoriteItems ?? false)) {
+    return false;
+  }
+
+  if (hasPinned && !(contentSettings?.deletePinnedItems ?? false)) {
+    return false;
+  }
+
+  const needConfirm =
+    (hasFavorite && (contentSettings?.deleteFavoriteConfirm ?? true)) ||
+    (hasPinned && (contentSettings?.deletePinnedConfirm ?? true)) ||
+    (!hasFavorite && !hasPinned && (contentSettings?.deleteConfirm ?? true));
+
+  if (needConfirm) {
+    const ok = await new Promise<boolean>((resolve) => {
+      getModalApi().confirm({
+        cancelText: i18n.t("common:actions.cancel"),
+        centered: true,
+        content: i18n.t("commands:deleteSelectedConfirm.content", {
+          count: items.length,
+        }),
+        okButtonProps: { danger: true },
+        okText: i18n.t("common:actions.delete"),
+        onCancel: () => resolve(false),
+        onOk: () => resolve(true),
+        title: i18n.t("commands:deleteSelectedConfirm.title"),
+      });
+    });
+
+    if (!ok) return false;
+  }
+
+  const removed = await call<number>(
+    TAURI_COMMAND.DELETE_CLIPBOARD_ITEMS,
+    "commands:labels.delete",
+    {
+      deleteFavorites: true,
+      deletePinned: true,
+      ids: items.map((item) => item.id),
+    },
+  );
+
+  getMessageApi().success(
+    i18n.t("commands:messages.clipboardItemsDeleted", { count: removed }),
+  );
+
+  return true;
+};
+
+/**
  * 清空剪贴板历史；默认保留收藏和置顶，确认选项决定是否连带删除受保护记录。
  */
 export const clearClipboardItems = async (): Promise<boolean> => {

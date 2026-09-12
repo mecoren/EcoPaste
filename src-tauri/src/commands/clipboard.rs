@@ -17,7 +17,7 @@ use crate::clipboard::{
 };
 use crate::core::{AppError, Result};
 use crate::db::items::{
-    clear_items, find_item_by_id, find_item_for_list_by_id, increment_item_use_count,
+    clear_items, delete_items, find_item_by_id, find_item_for_list_by_id, increment_item_use_count,
 };
 use crate::db::models::{
     ClipboardAction, ClipboardApp, ClipboardGroup, ClipboardItem, ClipboardItemPage,
@@ -1492,6 +1492,43 @@ pub async fn delete_clipboard_item(
         }
     }
     Ok(())
+}
+
+/// 批量删除记录（多选批量删除）。`delete_favorites` / `delete_pinned` 为 `false`
+/// 时受保护条目被跳过（与 `clear_clipboard_items` 同语义）。删行成功后连带删除
+/// 图片落盘文件；删文件失败仅记日志。完成后广播列表刷新事件，返回实际删除行数。
+#[tauri::command]
+pub async fn delete_clipboard_items(
+    app: AppHandle,
+    db: State<'_, DatabaseState>,
+    store: State<'_, ImageStore>,
+    ids: Vec<String>,
+    delete_favorites: bool,
+    delete_pinned: bool,
+) -> Result<u64> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let pool = db.pool().await;
+    let outcome = delete_items(&pool, &ids, delete_favorites, delete_pinned).await?;
+
+    for file_name in &outcome.image_files {
+        if let Err(err) = store.remove(file_name) {
+            log::warn!("remove deleted image {file_name} failed: {err}");
+        }
+    }
+
+    if let Err(err) = app.emit(
+        CLIPBOARD_UPDATED_EVENT,
+        serde_json::json!({
+            "cleanup": outcome.removed,
+        }),
+    ) {
+        log::warn!("emit {CLIPBOARD_UPDATED_EVENT} after batch delete failed: {err}");
+    }
+
+    Ok(outcome.removed)
 }
 
 /// 清空全部历史记录，并删除对应图片资源。完成后广播列表刷新事件。

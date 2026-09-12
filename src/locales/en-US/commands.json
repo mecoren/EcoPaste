@@ -9,6 +9,10 @@
     "content": "This item cannot be restored after deletion. Delete it?",
     "title": "Delete item"
   },
+  "deleteSelectedConfirm": {
+    "content": "The {{count}} selected records cannot be restored after deletion. Delete them?",
+    "title": "Delete selected records"
+  },
   "error": "{{label}} failed: {{message}}",
   "labels": {
     "addApp": "Add app",
@@ -88,6 +92,7 @@
     "clipboardGroupSaved": "Group saved",
     "clipboardGroupsLayoutSaved": "Group layout saved",
     "clipboardItemsCleared": "Cleared {{count}} records",
+    "clipboardItemsDeleted": "Deleted {{count}} records",
     "copied": "Copied",
     "deleted": "Deleted",
     "favoriteAdded": "Added to favorites",

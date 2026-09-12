@@ -333,11 +333,17 @@ fn image_file_name(kind: ClipboardKind, content: String) -> Option<String> {
     (kind == ClipboardKind::Image).then_some(content)
 }
 
-/// 批量删除，返回实际删除行数；`ids` 为空时不发查询。
-#[allow(dead_code)]
-pub async fn delete_items(pool: &SqlitePool, ids: &[String]) -> Result<u64> {
+/// 批量删除指定 id 的条目，返回删除行数与其中图片记录的落盘文件名（供调用方删图）；
+/// `ids` 为空时不发查询，不存在的 id 静默跳过。`delete_favorites` / `delete_pinned`
+/// 为 `false` 时受保护条目被跳过（与 [`clear_items`] 同语义）。
+pub async fn delete_items(
+    pool: &SqlitePool,
+    ids: &[String],
+    delete_favorites: bool,
+    delete_pinned: bool,
+) -> Result<CleanupOutcome> {
     if ids.is_empty() {
-        return Ok(0);
+        return Ok(CleanupOutcome::default());
     }
 
     let mut qb: QueryBuilder<Sqlite> =
@@ -347,13 +353,23 @@ pub async fn delete_items(pool: &SqlitePool, ids: &[String]) -> Result<u64> {
         separated.push_bind(id);
     }
     qb.push(")");
+    if !delete_favorites {
+        qb.push(" AND is_favorite = 0");
+    }
+    if !delete_pinned {
+        qb.push(" AND is_pinned = 0");
+    }
+    qb.push(" RETURNING kind, content");
 
-    let result = qb
-        .build()
-        .execute(pool)
+    let rows = qb
+        .build_query_as::<(ClipboardKind, String)>()
+        .fetch_all(pool)
         .await
         .context("failed to delete clipboard items")?;
-    Ok(result.rows_affected())
+
+    let mut outcome = CleanupOutcome::default();
+    absorb_deleted(&mut outcome, rows);
+    Ok(outcome)
 }
 
 /// 历史清理的结果：删除行数 + 其中图片记录的落盘文件名（供调用方删图）。
@@ -1356,22 +1372,72 @@ mod tests {
         for id in ["a", "b", "c"] {
             insert_item(&pool, &sample_item(id)).await.unwrap();
         }
+        let mut img = sample_item("img");
+        img.kind = ClipboardKind::Image;
+        img.content = "deadbeef.png".to_owned();
+        img.content_hash = content_hash(ClipboardKind::Image, "deadbeef.png");
+        insert_item(&pool, &img).await.unwrap();
 
-        assert_eq!(delete_items(&pool, &[]).await.unwrap(), 0);
+        let empty = delete_items(&pool, &[], false, false).await.unwrap();
+        assert_eq!(empty.removed, 0);
+        assert!(empty.image_files.is_empty());
 
-        let removed = delete_items(
+        let outcome = delete_items(
             &pool,
-            &["a".to_owned(), "b".to_owned(), "missing".to_owned()],
+            &["a".to_owned(), "img".to_owned(), "missing".to_owned()],
+            false,
+            false,
         )
         .await
         .unwrap();
-        assert_eq!(removed, 2);
+        assert_eq!(outcome.removed, 2);
+        // 被删的图片行必须带回落盘文件名供调用方删图。
+        assert_eq!(outcome.image_files, ["deadbeef.png".to_owned()]);
         assert_eq!(
             ids(&query_items(&pool, &ClipboardItemQuery::default())
                 .await
                 .unwrap()),
-            ["c"]
+            ["b", "c"]
         );
+    }
+
+    #[tokio::test]
+    async fn delete_items_skips_favorites_and_pinned_unless_allowed() {
+        let pool = memory_pool().await;
+        let mut fav = sample_item("fav");
+        fav.is_favorite = true;
+        let mut pinned = sample_item("pinned");
+        pinned.is_pinned = true;
+        for item in [&sample_item("plain").clone(), &fav, &pinned] {
+            insert_item(&pool, item).await.unwrap();
+        }
+
+        // 默认保护：仅删除未受保护条目。
+        let guarded = delete_items(
+            &pool,
+            &["plain".to_owned(), "fav".to_owned(), "pinned".to_owned()],
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(guarded.removed, 1);
+        assert_eq!(
+            ids(&query_items(&pool, &ClipboardItemQuery::default())
+                .await
+                .unwrap()),
+            ["pinned", "fav"]
+        );
+
+        // 显式允许删除收藏与置顶。
+        let forced = delete_items(&pool, &["fav".to_owned(), "pinned".to_owned()], true, true)
+            .await
+            .unwrap();
+        assert_eq!(forced.removed, 2);
+        assert!(query_items(&pool, &ClipboardItemQuery::default())
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

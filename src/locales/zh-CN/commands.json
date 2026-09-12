@@ -9,6 +9,10 @@
     "content": "删除后无法恢复，确定删除这条记录吗？",
     "title": "删除记录"
   },
+  "deleteSelectedConfirm": {
+    "content": "删除后无法恢复，确定删除选中的 {{count}} 条记录吗？",
+    "title": "删除选中记录"
+  },
   "error": "{{label}}失败：{{message}}",
   "labels": {
     "addApp": "添加应用",
@@ -88,6 +92,7 @@
     "clipboardGroupSaved": "已保存分组",
     "clipboardGroupsLayoutSaved": "已保存分组布局",
     "clipboardItemsCleared": "已清空 {{count}} 条记录",
+    "clipboardItemsDeleted": "已删除 {{count}} 条记录",
     "copied": "已复制",
     "deleted": "已删除",
     "favoriteAdded": "已收藏",

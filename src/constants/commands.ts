@@ -14,6 +14,7 @@ export const TAURI_COMMAND = {
   CREATE_CLIPBOARD_GROUP: "create_clipboard_group",
   DELETE_CLIPBOARD_GROUP: "delete_clipboard_group",
   DELETE_CLIPBOARD_ITEM: "delete_clipboard_item",
+  DELETE_CLIPBOARD_ITEMS: "delete_clipboard_items",
   DELETE_UNREFERENCED_CLIPBOARD_APPS: "delete_unreferenced_clipboard_apps",
   DETECT_LEGACY_DATA: "detect_legacy_data",
   DOWNLOAD_UPDATE: "download_update",
