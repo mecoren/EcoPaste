@@ -124,35 +124,36 @@ pub fn materialize_source(
 ///
 /// `source_app` 为 `Some` 时先 upsert apps 表再写 item，满足 FK 约束。
 /// 应用 upsert 失败不阻断条目入库——清掉 source_app_id 后继续，避免单次系统调用抽风丢内容。
+/// 按值接 item（避免复制事件热路径上整结构 clone，content 最大 4MB），
+/// 返回写入后的 item 供调用方继续消费（如 `read_clipboard` 回显）。
 pub async fn persist_and_notify(
     app: &AppHandle,
     pool: &SqlitePool,
-    item: &ClipboardItem,
+    mut item: ClipboardItem,
     source_app: Option<&ClipboardApp>,
-) -> crate::core::Result<UpsertResult> {
-    let mut item_to_write = item.clone();
+) -> crate::core::Result<(UpsertResult, ClipboardItem)> {
     if let Some(src) = source_app {
         match upsert_app(pool, src).await {
             Ok(()) => {}
             Err(err) => {
                 log::warn!("clipboard source app upsert failed ({}): {err}", src.id);
-                item_to_write.source_app_id = None;
+                item.source_app_id = None;
             }
         }
     }
-    let result = upsert_item(pool, &item_to_write).await?;
+    let result = upsert_item(pool, &item).await?;
     sound::maybe_play_copy(app);
     if let Err(err) = app.emit(
         CLIPBOARD_UPDATED_EVENT,
         json!({
             "id": result.id,
-            "kind": item_to_write.kind,
+            "kind": item.kind,
             "deduplicated": result.deduplicated,
         }),
     ) {
         log::warn!("emit {CLIPBOARD_UPDATED_EVENT} failed: {err}");
     }
-    Ok(result)
+    Ok((result, item))
 }
 
 /// 启动监听：注册 [`WritebackGuard`] / [`ImageStore`] / [`AppIconStore`] 到 Tauri `State`
@@ -334,7 +335,7 @@ impl ClipboardHandler for ClipboardChangeHandler {
         let app = self.app.clone();
         tauri::async_runtime::spawn(async move {
             let pool = app.state::<crate::db::DatabaseState>().pool().await;
-            if let Err(err) = persist_and_notify(&app, &pool, &item, source_app.as_ref()).await {
+            if let Err(err) = persist_and_notify(&app, &pool, item, source_app.as_ref()).await {
                 log::error!("clipboard watcher: persist failed: {err}");
             }
         });
