@@ -26,6 +26,10 @@ const SHORTCUTS: Shortcut[] = [
   { keys: "Enter", labelKey: "shortcuts.pasteSelected" },
   { keys: "CmdOrCtrl+Enter", labelKey: "shortcuts.pasteSelectedPlain" },
   { keys: ["CmdOrCtrl", "1-0"], labelKey: "shortcuts.pasteNth" },
+  {
+    keys: ["CmdOrCtrl", "Shift", "1-0"],
+    labelKey: "shortcuts.pasteNthPlain",
+  },
   { keys: "Space", labelKey: "shortcuts.previewSelected" },
   { keys: "A-Z", labelKey: "shortcuts.typeToSearch" },
   { keys: "CmdOrCtrl+C", labelKey: "shortcuts.copySelected" },
@@ -37,6 +41,14 @@ const SHORTCUTS: Shortcut[] = [
   {
     keys: ["CmdOrCtrl", "Backspace"],
     labelKey: "shortcuts.deleteSelected",
+  },
+  {
+    keys: ["CmdOrCtrl", "Click"],
+    labelKey: "shortcuts.multiSelect",
+  },
+  {
+    keys: ["Shift", "ArrowUp", "/", "Shift", "ArrowDown"],
+    labelKey: "shortcuts.extendSelection",
   },
   { keys: ["ArrowUp", "/", "ArrowDown"], labelKey: "shortcuts.navigate" },
   { keys: "CmdOrCtrl+F", labelKey: "shortcuts.focusSearch" },
@@ -55,9 +67,6 @@ const SHORTCUTS: Shortcut[] = [
   { keys: "CmdOrCtrl+,", labelKey: "shortcuts.openPreference" },
   { keys: "Escape", labelKey: "shortcuts.closePreviewFilterWindow" },
 ];
-
-// 暂未实现但占位，方便后续补齐（注释提示，不渲染）：
-// SHIFT 触发的组合：⇧⌘1 粘贴第一行为纯文本等。
 
 /**
  * 快捷键速查面板：列出当前剪贴板窗口已支持的所有键盘操作；

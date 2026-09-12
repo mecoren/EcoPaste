@@ -16,6 +16,7 @@ import {
 import { useSnapshot } from "valtio";
 import {
   deleteClipboardItem,
+  deleteClipboardItems,
   getClipboardItem,
   hideWindow,
   listClipboardGroups,
@@ -95,6 +96,9 @@ const List: FC = () => {
   const [customGroups, setCustomGroups] = useState<ClipboardGroupRecord[]>([]);
   const [noteTarget, setNoteTarget] = useState<ClipboardItem | null>(null);
   const [editTarget, setEditTarget] = useState<ClipboardItem | null>(null);
+  // 多选批量删除的选中集（Ditto/CopyQ 标配）：Ctrl/Cmd+Click 单选切换、
+  // Shift+↑/↓ 从锚点扩展；空集时所有快捷键维持单条语义。
+  const [multiSelectedIds, setMultiSelectedIds] = useState<string[]>([]);
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const isAtTopRef = useRef(true);
   const itemElementMapRef = useRef(new Map<string, HTMLDivElement>());
@@ -103,6 +107,8 @@ const List: FC = () => {
   const keywordRef = useRef("");
   const reloadCurrentRangeRef = useRef<() => void>(() => {});
   const deferredReloadRef = useRef(false);
+  // Shift+↑/↓ 范围选择的锚点：开始范围选择时的条目 id；清空多选时一并复位。
+  const multiSelectAnchorRef = useRef<string | null>(null);
   // 剪贴板窗口启动即隐藏，初值取 false；首个 `window://visibility` show 事件会翻正。
   // dormant（隐藏）期间到达的剪贴板更新一律延后，不 reload 隐藏窗口。
   const clipboardWindowVisibleRef = useRef(false);
@@ -185,6 +191,7 @@ const List: FC = () => {
   // biome-ignore lint/correctness/useExhaustiveDependencies: snapshot 作触发器，不需在回调内读取
   useEffect(() => {
     setSelectedId(null);
+    clearMultiSelection();
     if (keywordRef.current !== keyword) keywordRef.current = keyword;
     deferredReloadRef.current = false;
     closePreview("filterChange");
@@ -241,6 +248,7 @@ const List: FC = () => {
     if (payload.cleanup !== void 0) {
       closePreview("cleanup");
       setSelectedId(null);
+      clearMultiSelection();
       deferredReloadRef.current = false;
       if (clipboardStatsState.total !== null) {
         clipboardStatsState.total = Math.max(
@@ -255,6 +263,7 @@ const List: FC = () => {
     if (payload.imported) {
       closePreview("backupImport");
       setSelectedId(null);
+      clearMultiSelection();
       requestReloadAtTop();
       return;
     }
@@ -551,6 +560,105 @@ const List: FC = () => {
     removeItem(id);
   };
 
+  /** 清空多选选中集并复位范围选择锚点。 */
+  const clearMultiSelection = () => {
+    multiSelectAnchorRef.current = null;
+    setMultiSelectedIds([]);
+  };
+
+  /** Ctrl/Cmd+Click 切换单个条目的选中态；首次选中时记录范围选择锚点。 */
+  const toggleMultiSelected = (id: string) => {
+    setMultiSelectedIds((previous) => {
+      if (previous.includes(id)) {
+        return previous.filter((selectedId) => selectedId !== id);
+      }
+
+      if (previous.length === 0) multiSelectAnchorRef.current = id;
+
+      return [...previous, id];
+    });
+  };
+
+  /**
+   * Shift+↑/↓ 范围选择：从锚点到当前项整体加入选中集。
+   * 返回 true 表示事件已消费（本次方向键不再移动单选）。
+   */
+  const extendMultiSelection = (item: ClipboardItem) => {
+    const anchorId = multiSelectAnchorRef.current;
+
+    if (!anchorId) {
+      multiSelectAnchorRef.current = item.id;
+      setMultiSelectedIds([item.id]);
+      return true;
+    }
+
+    const anchorIndex = getItemIndexById(anchorId);
+    const targetIndex = getItemIndexById(item.id);
+
+    if (anchorIndex === null || targetIndex === null) return false;
+
+    setMultiSelectedIds((previous) => {
+      const [startIndex, endIndex] =
+        anchorIndex <= targetIndex
+          ? [anchorIndex, targetIndex]
+          : [targetIndex, anchorIndex];
+      const rangeIds: string[] = [];
+
+      for (let index = startIndex; index <= endIndex; index += 1) {
+        const current = getItem(index);
+        if (!current) break;
+
+        rangeIds.push(current.id);
+      }
+
+      return Array.from(new Set([...previous, ...rangeIds]));
+    });
+
+    return true;
+  };
+
+  /**
+   * 批量删除选中集：受保护条目直接拒绝（与单条删除同语义，不做部分删除）；
+   * 确认弹层由 `deleteClipboardItems` 内置。删除后本地逐条移除并清空选中集。
+   */
+  const handleBatchDelete = async () => {
+    const targets = multiSelectedIds
+      .map((id) => findItemById(id))
+      .filter((item): item is ClipboardItem => item !== null);
+
+    if (targets.length === 0) {
+      clearMultiSelection();
+      return;
+    }
+
+    // 保护校验前置：选中集里有不可删条目时整体放弃，让用户先取消勾选。
+    if (targets.some((item) => !canDeleteItem(item))) return;
+
+    const deleted = await deleteClipboardItems(
+      targets.map((item) => ({
+        id: item.id,
+        isFavorite: item.isFavorite,
+        isPinned: item.isPinned,
+      })),
+    );
+
+    if (!deleted) return;
+
+    if (
+      previewSession?.itemId &&
+      multiSelectedIds.includes(previewSession.itemId)
+    ) {
+      closePreview("batchDelete");
+    }
+
+    for (const id of multiSelectedIds) {
+      removeItem(id);
+    }
+
+    setSelectedId(null);
+    clearMultiSelection();
+  };
+
   /**
    * 快捷键触发的收藏切换：读当前项的 isFavorite 计算下一态，
    * Rust 返回真实状态后走统一的 `handleFavoriteToggled`（favorite 分组内取消会移除）。
@@ -700,6 +808,12 @@ const List: FC = () => {
 
     if (event.key === "Escape") {
       event.preventDefault();
+
+      if (multiSelectedIds.length > 0) {
+        clearMultiSelection();
+        return;
+      }
+
       closeTopEscapeLayer();
 
       return;
@@ -730,6 +844,12 @@ const List: FC = () => {
       (event.key === "Backspace" || event.key === "Delete")
     ) {
       event.preventDefault();
+
+      // 多选非空时走批量删除，忽略当前单选高亮。
+      if (multiSelectedIds.length > 0) {
+        void handleBatchDelete();
+        return;
+      }
 
       const activeItem = getActiveItem();
 
@@ -828,6 +948,17 @@ const List: FC = () => {
     const next = getNextKeyboardTarget(event);
 
     if (!next) return;
+
+    // Shift+方向键：从锚点扩展多选范围，仍滚动跟视但不改单选高亮。
+    if (event.shiftKey) {
+      virtuosoRef.current?.scrollIntoView({
+        behavior: "smooth",
+        index: next.index,
+      });
+
+      extendMultiSelection(next.item);
+      return;
+    }
 
     setSelectedId(next.item.id);
     virtuosoRef.current?.scrollIntoView({
@@ -981,9 +1112,10 @@ const List: FC = () => {
         ? KEY_HINTS[relativeIndex]
         : void 0;
 
-    const handleQuickPaste = () => {
-      closePreview("quickPaste");
-      pasteClipboardItem(item.id, false);
+    // Shift+数字键粘贴为纯文本（Ditto 式 ⌥+n 等价物）；KeyHint 传入原生事件。
+    const handleQuickPaste = (event?: KeyboardEvent) => {
+      closePreview(event?.shiftKey ? "quickPastePlain" : "quickPaste");
+      pasteClipboardItem(item.id, Boolean(event?.shiftKey));
     };
 
     const handleOpenLink = () => {
@@ -1053,6 +1185,13 @@ const List: FC = () => {
     };
 
     const handleMouseDown = (event: ReactMouseEvent<HTMLDivElement>) => {
+      // Ctrl/Cmd+Click：切换多选，不触发粘贴/复制等单击行为。
+      if (event.button === 0 && (isMac ? event.metaKey : event.ctrlKey)) {
+        event.preventDefault();
+        toggleMultiSelected(item.id);
+        return;
+      }
+
       if (event.button !== 0) {
         if (event.button !== 1) return;
 
@@ -1138,9 +1277,10 @@ const List: FC = () => {
           availableActions={availableActions}
           hintKey={hintKey}
           isSelected={
-            selectedId === null
+            multiSelectedIds.includes(item.id) ||
+            (selectedId === null
               ? index === firstVisibleIndex
-              : item.id === selectedId
+              : item.id === selectedId)
           }
           item={item}
           onAuxClick={handleAuxClick}
