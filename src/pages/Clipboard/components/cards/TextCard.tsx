@@ -1,4 +1,5 @@
 import type { CSSProperties, FC, MouseEvent } from "react";
+import { memo } from "react";
 import { useSnapshot } from "valtio";
 import Highlight from "@/components/Highlight";
 import { clipboardViewState } from "@/stores/clipboardView";
@@ -8,11 +9,9 @@ import { cn } from "@/utils/cn";
 
 interface TextCardProps extends ClipboardItem {
   /**
-   * MOD 键按下时，URL / Email 以可点击链接样式渲染。
-   */
-  isLinkActive?: boolean;
-  /**
    * 点击 URL / Email 文本时由列表层打开系统浏览器或邮件客户端。
+   * 链接态展示由列表根节点 `data-mod-pressed` + 全局 `.clipboard-text-link`
+   * CSS 驱动（见 `styles/global.scss`），不经过 React state。
    */
   onOpenLink?: () => void;
 }
@@ -22,13 +21,11 @@ interface TextCardProps extends ClipboardItem {
  * 子类型（HTML/RTF/URL/Email/Color/Path）以小 Tag 提示。
  */
 const TextCard: FC<TextCardProps> = (props) => {
-  const { summary, subKind, colorPreview, isLinkActive, onOpenLink } = props;
+  const { summary, subKind, colorPreview, onOpenLink } = props;
   const { keyword } = useSnapshot(clipboardViewState);
   const { clipboard } = useSnapshot(settingsState);
   const textMaxLines = clipboard.display.textMaxLines;
   const lineClampClass = textLineClampClass(textMaxLines);
-  const isOpenableLink =
-    isLinkActive && (subKind === "url" || subKind === "email");
 
   if (subKind === "color" && colorPreview) {
     const style: CSSProperties = {
@@ -58,11 +55,13 @@ const TextCard: FC<TextCardProps> = (props) => {
     onOpenLink?.();
   };
 
-  if (isOpenableLink) {
+  const isLinkable = subKind === "url" || subKind === "email";
+
+  if (isLinkable) {
     return (
       <button
         className={cn(
-          "block w-full cursor-pointer whitespace-pre-wrap border-0 bg-transparent p-0 text-left text-ant-primary underline underline-offset-2",
+          "clipboard-text-link block w-full whitespace-pre-wrap border-0 bg-transparent p-0 text-left",
           lineClampClass,
         )}
         onClick={handleLinkClick}
@@ -81,7 +80,7 @@ const TextCard: FC<TextCardProps> = (props) => {
   );
 };
 
-export default TextCard;
+export default memo(TextCard);
 
 /**
  * 把用户设置夹到 UnoCSS safelist 覆盖的 line-clamp 类。

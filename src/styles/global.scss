@@ -23,3 +23,25 @@ html {
   --os-handle-bg-hover: var(--ant-color-text-tertiary);
   --os-handle-bg-active: var(--ant-color-text-secondary);
 }
+
+/**
+ * 剪贴板列表 URL / Email 文本的链接态：MOD 键按下时列表根节点带
+ * `data-mod-pressed="true"`，属性选择器联动切换视觉——修饰键状态不进
+ * React state，按下/抬起不触发列表重渲染。
+ * 未按下时按钮保持纯文本外观且点击穿透到卡片（沿用旧 div 的交互语义：
+ * 单击触发选中 / 自动粘贴，不开链接）。
+ */
+.clipboard-text-link {
+  color: inherit;
+  cursor: default;
+  pointer-events: none;
+  text-decoration: none;
+}
+
+[data-mod-pressed="true"] .clipboard-text-link {
+  color: var(--ant-color-primary);
+  cursor: pointer;
+  pointer-events: auto;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}

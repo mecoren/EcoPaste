@@ -300,6 +300,37 @@ export const useClipboardItems = (query: ClipboardItemQuery) => {
     [commitItems, getItemIndexById],
   );
 
+  /**
+   * 新条目事件增量插入：插到置顶块之后（后端 `ORDER BY is_pinned DESC` 恒置顶前置），
+   * 该位置起的既有行索引 +1，total +1。与 `removeItemById` 对称，避免事件驱动的整页 reload。
+   * 同 id 已在缓存时退化为 patch（快速连续复制的队列兜底）。
+   * 调用方需自行排除置顶块位置不确定的排序（如 useCountDesc）与搜索态。
+   */
+  const insertItemAtTop = useCallback(
+    (item: ClipboardItem) => {
+      if (getItemIndexById(item.id) !== null) {
+        patchItemById(item.id, item);
+        return;
+      }
+
+      const insertIndex = getLeadingPinnedEnd(itemsRef.current) + 1;
+      const nextItems = new Map<number, ClipboardItem>();
+      for (const [currentIndex, value] of itemsRef.current) {
+        nextItems.set(
+          currentIndex >= insertIndex ? currentIndex + 1 : currentIndex,
+          value,
+        );
+      }
+      nextItems.set(insertIndex, item);
+
+      const nextTotal = totalRef.current + 1;
+      trimCache(nextItems, viewRangeRef.current, nextTotal);
+      commitItems(nextItems);
+      commitTotal(nextTotal);
+    },
+    [commitItems, commitTotal, getItemIndexById, patchItemById],
+  );
+
   useEffect(() => {
     queryRef.current = {
       favorite: query.favorite,
@@ -328,6 +359,7 @@ export const useClipboardItems = (query: ClipboardItemQuery) => {
     findItemById,
     getItem,
     getItemIndexById,
+    insertItemAtTop,
     loadedInitial,
     loading,
     loadingMore: loadingRangeCount > 0 && loadedInitial,

@@ -1,4 +1,9 @@
 export const PREVIEW_CACHE_LIMIT = 16;
+/**
+ * 预览 LRU 的字节预算：按 payload 估算占用（text 长度 + files 路径长度）驱逐，
+ * 避免几条超大文本（如整段日志）把常驻 webview 内存撑到几十 MB。
+ */
+export const PREVIEW_CACHE_MAX_BYTES = 2 * 1024 * 1024;
 export const PREVIEW_PANEL_GAP = 40;
 export const PREVIEW_PANEL_MARGIN = 32;
 export const PREVIEW_PANEL_MIN_HEIGHT = 96;

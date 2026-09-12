@@ -837,6 +837,21 @@ export const listClipboardItems = (query: ClipboardItemQuery) => {
 };
 
 /**
+ * 按 id 拉取单条「列表视图」条目（text 类型 content 已裁剪），供
+ * `clipboard://updated` 事件增量刷新新条目——替代整页重拉。
+ * 条目不存在（刚被清理/删除）返回 `null`，调用方降级到 reload。
+ */
+export const getClipboardItem = (id: string) => {
+  return call<ClipboardItem | null>(
+    TAURI_COMMAND.GET_CLIPBOARD_ITEM,
+    "commands:labels.loadClipboardList",
+    {
+      id,
+    },
+  );
+};
+
+/**
  * 列出自定义剪贴板分组；隐藏态由调用方按场景决定是否过滤。
  */
 export const listClipboardGroups = () => {

@@ -16,6 +16,7 @@ import {
 import { useSnapshot } from "valtio";
 import {
   deleteClipboardItem,
+  getClipboardItem,
   hideWindow,
   listClipboardGroups,
   openClipboardItemLink,
@@ -91,7 +92,6 @@ const List: FC = () => {
   const { t } = useTranslation("clipboard");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [firstVisibleIndex, setFirstVisibleIndex] = useState(0);
-  const [isModifierPressed, setIsModifierPressed] = useState(false);
   const [customGroups, setCustomGroups] = useState<ClipboardGroupRecord[]>([]);
   const [noteTarget, setNoteTarget] = useState<ClipboardItem | null>(null);
   const [editTarget, setEditTarget] = useState<ClipboardItem | null>(null);
@@ -106,6 +106,16 @@ const List: FC = () => {
   // 剪贴板窗口启动即隐藏，初值取 false；首个 `window://visibility` show 事件会翻正。
   // dormant（隐藏）期间到达的剪贴板更新一律延后，不 reload 隐藏窗口。
   const clipboardWindowVisibleRef = useRef(false);
+  // 增量插入的降级入口：单条拉取失败 / 条目已被清理时整页 reload 兜底。
+  const reloadRef = useRef<() => void>(() => {});
+  const insertItemAtTopRef = useRef<(item: ClipboardItem) => void>(() => {});
+  // 增量插入的串行队列：连续复制的多个事件若并发拉取，IPC 完成顺序可能颠倒，
+  // 队列保证按事件顺序插入。
+  const pendingInsertIdsRef = useRef<string[]>([]);
+  const insertingRef = useRef(false);
+  // MOD 键按下态直接写根节点 data 属性（TextCard 用属性选择器消费切链接态），
+  // 不进 React state——避免 setState 引发全列表重渲染。
+  const listRootRef = useRef<HTMLDivElement>(null);
 
   const snapshot = useSnapshot(clipboardViewState);
   const settings = useSnapshot(settingsState);
@@ -129,6 +139,7 @@ const List: FC = () => {
     findItemById,
     getItem,
     getItemIndexById,
+    insertItemAtTop,
     loadRange,
     loadedInitial,
     loading,
@@ -163,6 +174,8 @@ const List: FC = () => {
   });
   closePreviewRef.current = closePreview;
   reloadCurrentRangeRef.current = reloadCurrentRange;
+  reloadRef.current = reload;
+  insertItemAtTopRef.current = insertItemAtTop;
 
   // 把 Rust 返回的同过滤下总数同步给 Footer（共享 store），避免 Footer 单独 IPC 计数。
   useEffect(() => {
@@ -246,22 +259,6 @@ const List: FC = () => {
       return;
     }
 
-    if (payload.deduplicated) {
-      if (
-        !shouldRefreshCurrentGroup(
-          clipboardViewState.range,
-          clipboardViewState.category,
-          clipboardViewState.groupId,
-          payload.kind,
-        )
-      ) {
-        return;
-      }
-
-      requestReloadAtTop();
-      return;
-    }
-
     if (
       !shouldRefreshCurrentGroup(
         clipboardViewState.range,
@@ -273,7 +270,74 @@ const List: FC = () => {
       return;
     }
 
+    // 去重命中：既有条目 use_count / updated_at 变化，精确 patch 不可靠，走 reload
+    // （保留原有的顶部判定：浏览中不打断，回顶后补刷）。
+    if (payload.deduplicated) {
+      requestReloadAtTop();
+      return;
+    }
+
+    // 搜索态：插入位置取决于关键词匹配结果，交给后端排序——整页 reload 语义最稳。
+    if (clipboardViewState.keyword.length > 0) {
+      requestReloadAtTop();
+      return;
+    }
+
+    // useCountDesc 排序下新条目位置未知（老条目可能排它前面），同样交给 reload。
+    if (sort === "useCountDesc") {
+      requestReloadAtTop();
+      return;
+    }
+
+    // 来源应用过滤视图：新条目是否属于该应用要等单条拉取后才能判定，
+    // 插入位置/过滤归属都交给整页 reload，避免把别家的条目插进当前视图。
+    if (clipboardViewState.sourceAppId !== null) {
+      requestReloadAtTop();
+      return;
+    }
+
+    // 新条目：按 id 单条拉取 + 本地插入，替代整页 reload（事件携带 id，后端
+    // `get_clipboard_item` 专为这条链路准备）。列表不在顶部时不前插——
+    // 前插会让可视区整体下移打断浏览位置，延后到回顶再刷（与旧语义一致）。
+    if (payload.id && isAtTopRef.current) {
+      pendingInsertIdsRef.current.push(payload.id);
+      void drainPendingInserts();
+      return;
+    }
+
     requestReloadAtTop();
+  };
+
+  /**
+   * 串行消费增量插入队列：一次只发一个 IPC，完成后再取下一个，
+   * 保证连续复制事件的插入顺序与事件到达顺序一致。
+   */
+  const drainPendingInserts = async () => {
+    if (insertingRef.current) return;
+
+    const nextId = pendingInsertIdsRef.current.shift();
+    if (!nextId) return;
+
+    insertingRef.current = true;
+    try {
+      const item = await getClipboardItem(nextId);
+
+      if (item) {
+        insertItemAtTopRef.current(item);
+        return;
+      }
+
+      // 条目已被清理（竞态）：交由整页 reload 保证列表一致。
+      requestReloadAtTop();
+    } catch {
+      // 命令包装层已统一 log + toast；这里只需保证列表状态不脱节。
+      requestReloadAtTop();
+    } finally {
+      insertingRef.current = false;
+      if (pendingInsertIdsRef.current.length > 0) {
+        void drainPendingInserts();
+      }
+    }
   };
 
   useTauriListen<ClipboardUpdatedPayload>(
@@ -616,10 +680,23 @@ const List: FC = () => {
 
   useTauriListen(TAURI_EVENT.CLIPBOARD_MENU_ACTION, handleMenuActionEvent);
 
+  /**
+   * MOD 键按下态写到根节点 data 属性（TextCard 的链接态 CSS 据此切换），
+   * 不进 React state——修饰键每次按下/抬起若触发 setState 会重渲染全部可视卡片。
+   */
+  const syncModifierPressed = (event: KeyboardEvent) => {
+    const pressed = isMac ? event.metaKey : event.ctrlKey;
+    const root = listRootRef.current;
+
+    if (root && root.dataset.modPressed !== String(pressed)) {
+      root.dataset.modPressed = String(pressed);
+    }
+  };
+
   const handleKeyDown = (event: KeyboardEvent) => {
     const eventModifierPressed = isMac ? event.metaKey : event.ctrlKey;
 
-    setIsModifierPressed(eventModifierPressed);
+    syncModifierPressed(event);
 
     if (event.key === "Escape") {
       event.preventDefault();
@@ -764,9 +841,7 @@ const List: FC = () => {
   useKeyboardEvent("keydown", handleKeyDown);
 
   const handleKeyUp = (event: KeyboardEvent) => {
-    const eventModifierPressed = isMac ? event.metaKey : event.ctrlKey;
-
-    setIsModifierPressed(eventModifierPressed);
+    syncModifierPressed(event);
   };
 
   useKeyboardEvent("keyup", handleKeyUp);
@@ -845,7 +920,9 @@ const List: FC = () => {
   return (
     <div
       className="relative flex-1 overflow-hidden"
+      data-mod-pressed={false}
       onPointerLeave={handlePreviewAreaPointerLeave}
+      ref={listRootRef}
       role="listbox"
     >
       <VirtuosoScroller>{renderVirtuoso}</VirtuosoScroller>
@@ -1060,7 +1137,6 @@ const List: FC = () => {
         <ClipboardCard
           availableActions={availableActions}
           hintKey={hintKey}
-          isLinkActive={isModifierPressed}
           isSelected={
             selectedId === null
               ? index === firstVisibleIndex

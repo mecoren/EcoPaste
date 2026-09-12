@@ -1,5 +1,5 @@
 import type { DragEvent, FC, MouseEvent, PointerEvent, Ref } from "react";
-import { useState } from "react";
+import { memo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { popupClipboardItemMenu, startDragClipboardItem } from "@/commands";
 import AssetImage from "@/components/AssetImage";
@@ -28,10 +28,6 @@ interface ClipboardCardProps {
    */
   onQuickPaste?: () => void;
   /**
-   * MOD 键按下时，URL / Email 文本以链接态展示。
-   */
-  isLinkActive?: boolean;
-  /**
    * 点击 URL / Email 文本时打开外部链接。
    */
   onOpenLink?: () => void;
@@ -54,6 +50,9 @@ interface ClipboardCardProps {
  * `isSelected` 为 true 时高亮背景与边框；指针事件由列表注入用于 hover preview；
  * 右键根节点弹出 Rust 端原生菜单（避免 tauri-apps/tauri#9470 的 muda use-after-free），
  * 点击菜单项后由列表层订阅 `clipboard://menu-action` 派发到实际处理逻辑。
+ *
+ * memo：列表任何 state 变化（选中、firstVisibleIndex）都会重跑 renderItemContent，
+ * 可视卡片数量级在 10±，逐卡片浅比较能挡掉绝大部分无效渲染。
  */
 const ClipboardCard: FC<ClipboardCardProps> = (props) => {
   const {
@@ -61,7 +60,6 @@ const ClipboardCard: FC<ClipboardCardProps> = (props) => {
     isSelected,
     hintKey,
     onQuickPaste,
-    isLinkActive,
     onOpenLink,
     onPointerEnter,
     onPointerLeave,
@@ -81,7 +79,7 @@ const ClipboardCard: FC<ClipboardCardProps> = (props) => {
   const [hovered, setHovered] = useState(false);
   const typeKey = subKind ?? kind;
   const typeLabel = t(`types.${typeKey}`);
-  const body = renderBody(item, isLinkActive, onOpenLink);
+  const body = renderBody(item, onOpenLink);
   const showSensitiveIndicator = item.isSensitive && item.kind === "text";
   const showStatusIndicators = item.isPinned || showSensitiveIndicator;
   const sourceAppIcon = sourceAppId ? (
@@ -210,18 +208,12 @@ function renderStatusIndicators(isPinned: boolean, isSensitive: boolean) {
   );
 }
 
-const renderBody = (
-  item: ClipboardItem,
-  isLinkActive?: boolean,
-  onOpenLink?: () => void,
-) => {
+const renderBody = (item: ClipboardItem, onOpenLink?: () => void) => {
   if (item.kind === "image") return <ImageCard {...item} />;
 
   if (item.kind === "files") return <FilesCard {...item} />;
 
-  return (
-    <TextCard {...item} isLinkActive={isLinkActive} onOpenLink={onOpenLink} />
-  );
+  return <TextCard {...item} onOpenLink={onOpenLink} />;
 };
 
-export default ClipboardCard;
+export default memo(ClipboardCard);
