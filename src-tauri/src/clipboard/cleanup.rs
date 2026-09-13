@@ -22,16 +22,28 @@ const SCHEDULER_TICK_INTERVAL: Duration = Duration::from_secs(60);
 const WAL_CHECKPOINT_THRESHOLD_ROWS: u64 = 500;
 
 /// 启动历史清理后台任务：启动立即清理一次，之后按设置周期到点清理。
+/// 每分钟 tick 只做一次 u64 代次比对：设置没变 → 不 snapshot 深拷整个 Settings，
+/// 直接沿用缓存的周期值判断是否到期；设置变化（用户调周期/时长/上限）→ 重读一次
+/// 设置刷新缓存，让新周期立即生效。全量 snapshot 只发生在「设置变化」或「到期执行」。
 pub fn spawn(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         run_once(&app).await;
         let mut last_cleanup_at = Instant::now();
+        let mut seen_settings_version = current_settings_version(&app);
+        let mut cached_interval = read_cleanup_interval(&app);
         let mut ticker = tokio::time::interval(SCHEDULER_TICK_INTERVAL);
         ticker.tick().await;
 
         loop {
             ticker.tick().await;
-            let Some(interval) = cleanup_interval(&app) else {
+
+            let version_now = current_settings_version(&app);
+            if version_now != seen_settings_version {
+                seen_settings_version = version_now;
+                cached_interval = read_cleanup_interval(&app);
+            }
+
+            let Some(interval) = cached_interval else {
                 continue;
             };
 
@@ -43,6 +55,24 @@ pub fn spawn(app: AppHandle) {
             last_cleanup_at = Instant::now();
         }
     });
+}
+
+/// 当前设置代次；`SettingsStore` 尚未注册（理论仅测试环境）时返回 0。
+fn current_settings_version(app: &AppHandle) -> u64 {
+    app.try_state::<SettingsStore>()
+        .map_or(0, |store| store.version())
+}
+
+/// 读取当前清理周期。`0` 表示关闭周期性清理（`None`）。
+fn read_cleanup_interval(app: &AppHandle) -> Option<Duration> {
+    let store = app.try_state::<SettingsStore>()?;
+    let hours = store.snapshot().clipboard.history.cleanup_interval_hours;
+
+    if hours == 0 {
+        return None;
+    }
+
+    Some(Duration::from_secs(u64::from(hours) * 60 * 60))
 }
 
 async fn run_once(app: &AppHandle) {
@@ -90,18 +120,6 @@ async fn checkpoint_if_bulk(pool: &sqlx::SqlitePool, removed: u64) {
         Ok(_) => log::info!("wal truncated after bulk cleanup ({removed} rows removed)"),
         Err(err) => log::warn!("wal truncate after bulk cleanup failed: {err}"),
     }
-}
-
-/// 读取当前清理周期。`0` 表示关闭周期性清理。
-fn cleanup_interval(app: &AppHandle) -> Option<Duration> {
-    let store = app.try_state::<SettingsStore>()?;
-    let hours = store.snapshot().clipboard.history.cleanup_interval_hours;
-
-    if hours == 0 {
-        return None;
-    }
-
-    Some(Duration::from_secs(u64::from(hours) * 60 * 60))
 }
 
 /// 删除被清理图片记录的落盘文件（原图 + 缩略图）。`ImageStore` 未注册或单个文件删除失败

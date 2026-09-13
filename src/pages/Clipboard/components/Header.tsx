@@ -27,6 +27,7 @@ import { settingsState } from "@/stores/settings";
 import { formatShortcutDisplay } from "@/utils/shortcut";
 import { useSearchTypeahead } from "../hooks/useSearchTypeahead";
 import SearchInput from "./SearchInput";
+import SearchShortKeywordHint from "./SearchShortKeywordHint";
 
 interface WindowVisibilityPayload {
   label: string;
@@ -185,6 +186,7 @@ const Header: FC = () => {
       <img alt={t("header.logoAlt")} className="size-5" src="/logo.png" />
 
       <div className="flex items-center gap-1">
+        <SearchShortKeywordHint className="absolute inset-x-0 top-full z-10" />
         <SearchInput
           allowClear
           blurToken={searchBlurToken}

@@ -151,15 +151,27 @@ pub async fn query_items(pool: &SqlitePool, q: &ClipboardItemQuery) -> Result<Ve
 /// 一次 IPC 拿到「本页项 / 当前过滤下的总数 / 是否还有下一页」。
 /// `keyword` 按字符长度分流：≥3 走 FTS5（trigram 分词），1–2 走 `LIKE '%kw%'`
 /// （兜底短词；trigram 索引最短 3 字符，对 1–2 字符词永远 0 命中）。
+///
+/// `q.skip_count = true` 时跳过 COUNT（`total` 返回哨兵 -1），供前端在同一
+/// 过滤组合下翻页时省掉每页一条全表 COUNT；`skip_count` 置位由前端按
+/// 「是否已有可用 total」决定，Rust 不做跨请求缓存（无列表状态真源）。
 pub async fn query_items_page(
     pool: &SqlitePool,
     q: &ClipboardItemQuery,
 ) -> Result<(Vec<ClipboardItem>, i64)> {
     let keyword = KeywordFilter::from_keyword(q.keyword.as_deref());
     let items = fetch_items(pool, q, keyword.clone()).await?;
+
+    if q.skip_count {
+        return Ok((items, TOTAL_SKIPPED_SENTINEL));
+    }
+
     let total = fetch_items_count(pool, q, keyword).await?;
     Ok((items, total))
 }
+
+/// `skip_count` 时 [`ClipboardItemPage::total`] 的哨兵值：表示「本次未计算」。
+pub const TOTAL_SKIPPED_SENTINEL: i64 = -1;
 
 /// 按 `id` 查找单条记录，不存在时返回 `None`。
 pub async fn find_item_by_id(pool: &SqlitePool, id: &str) -> Result<Option<ClipboardItem>> {
@@ -1676,5 +1688,32 @@ mod tests {
         assert_eq!(escape_like("100%"), "100\\%");
         assert_eq!(escape_like("a_b"), "a\\_b");
         assert_eq!(escape_like("c:\\path"), "c:\\\\path");
+    }
+
+    /// `skip_count` 跳过 COUNT 返回哨兵 -1；默认路径 total 正常计算。
+    #[tokio::test]
+    async fn skip_count_returns_sentinel_without_count() {
+        let pool = memory_pool().await;
+        for i in 0..5 {
+            let item = sample_item(&format!("item{i}"));
+            insert_item(&pool, &item).await.unwrap();
+        }
+
+        let with_count = ClipboardItemQuery {
+            limit: 3,
+            ..Default::default()
+        };
+        let (page, total) = query_items_page(&pool, &with_count).await.unwrap();
+        assert_eq!(total, 5);
+        assert_eq!(page.len(), 3);
+
+        let skipped = ClipboardItemQuery {
+            limit: 3,
+            skip_count: true,
+            ..Default::default()
+        };
+        let (page2, total2) = query_items_page(&pool, &skipped).await.unwrap();
+        assert_eq!(total2, TOTAL_SKIPPED_SENTINEL);
+        assert_eq!(page2.len(), 3, "skip_count 不影响本页数据");
     }
 }

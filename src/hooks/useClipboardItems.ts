@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listClipboardItems } from "@/commands";
 import type { ClipboardItem, ClipboardItemQuery } from "@/types/clipboard";
+import { CLIPBOARD_TOTAL_SKIPPED } from "@/types/clipboard";
 
 /**
  * 后端分页大小。保持略大于一屏的原有取值，range cache 以此对齐请求边界。
@@ -31,6 +32,8 @@ export const useClipboardItems = (query: ClipboardItemQuery) => {
   const requestTokenRef = useRef(0);
   const itemsRef = useRef(new Map<number, ClipboardItem>());
   const totalRef = useRef(0);
+  /** 当前过滤组合下是否已拿到可用 total；false 时的下一次请求带 COUNT，之后跳过。 */
+  const totalKnownRef = useRef(false);
   const loadingRangesRef = useRef<ClipboardItemsRange[]>([]);
   const loadedInitialRef = useRef(false);
   const viewRangeRef = useRef<ClipboardItemsRange>({
@@ -97,16 +100,25 @@ export const useClipboardItems = (query: ClipboardItemQuery) => {
 
       addLoadingRange(range);
 
+      // COUNT 治理：同过滤组合下只有第一次请求带 COUNT；此后翻页 skipCount，
+      // Rust 返回 total=-1 哨兵，沿用本地 total（由增删事件驱动修正）。
+      const needsCount = !totalKnownRef.current;
+      if (needsCount) totalKnownRef.current = true;
+
       try {
         const page = await listClipboardItems({
           ...queryRef.current,
           limit: range.end - range.start + 1,
           offset: range.start,
+          skipCount: !needsCount,
         });
 
         if (options.token !== requestTokenRef.current) return;
 
-        const nextTotal = Math.max(0, page.total);
+        const nextTotal =
+          page.total === CLIPBOARD_TOTAL_SKIPPED
+            ? totalRef.current
+            : Math.max(0, page.total);
         const nextItems = options.replace
           ? new Map<number, ClipboardItem>()
           : new Map(itemsRef.current);
@@ -150,6 +162,9 @@ export const useClipboardItems = (query: ClipboardItemQuery) => {
     const token = requestTokenRef.current + 1;
     requestTokenRef.current = token;
     resetLoadingRanges();
+    // reload 是事件驱动的全量刷新（cleanup 删除、显示设置变化等），total 可能
+    // 已陈旧——无条件重置，下一次请求重新带 COUNT。
+    totalKnownRef.current = false;
     if (!loadedInitialRef.current) {
       commitItems(new Map());
       commitTotal(0);
@@ -180,6 +195,7 @@ export const useClipboardItems = (query: ClipboardItemQuery) => {
     resetLoadingRanges();
     commitItems(new Map());
     commitTotal(0);
+    totalKnownRef.current = false;
     commitLoadedInitial(false);
     setLoading(true);
     viewRangeRef.current = {

@@ -227,6 +227,11 @@ pub struct ClipboardItemQuery {
     pub sort: ClipboardItemSort,
     pub limit: i64,
     pub offset: i64,
+    /// 翻页 COUNT 治理：`true` 时跳过同过滤的 `COUNT(*)`，`total` 返回哨兵 -1，
+    /// `has_more` 退化为长度判定（`list.len() == limit`）。前端在同一过滤组合下
+    /// 翻页时置 true，沿用首次取得的 total，省掉每页一条的全表 COUNT。
+    #[serde(default)]
+    pub skip_count: bool,
 }
 
 /// 列表顶部分组 Tab：UI 概念，与 `ClipboardGroup`（用户自建分组）不同。
@@ -253,14 +258,17 @@ impl Default for ClipboardItemQuery {
             sort: ClipboardItemSort::UpdatedAt,
             limit: 20,
             offset: 0,
+            skip_count: false,
         }
     }
 }
 
 /// 列表查询的一页结果：项 + 当前过滤下的总数 + 是否还有下一页。
-/// `total` 让 Footer 等 UI 无需再单独 IPC `count_clipboard_items`，
-/// `has_more` 由 Rust 用 `offset + list.len() < total` 精确计算，
-/// 避免前端用 `len == page_size` 近似（恰好整除时多一次空请求）。
+/// `total` 让 Footer 等 UI 无需再单独 IPC `count_clipboard_items`；
+/// `skip_count` 查询时 `total = -1`（哨兵：本次未计算，沿用前端缓存值）。
+/// `has_more` 语义：COUNT 路径用 `offset + len < total` 精确判定；
+/// `skip_count` 路径用 `list.len() == limit` 长度判定（恰好整除时最坏多一次空请求，
+/// 换每页省一条 COUNT，是刻意的取舍）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipboardItemPage {

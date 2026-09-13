@@ -67,6 +67,7 @@
     "openPreference": "偏好设置",
     "pin": "固定窗口",
     "searchPlaceholder": "搜索剪贴板...",
+    "shortKeywordHint": "输入至少 3 个字符可使用快速搜索",
     "unpin": "取消固定"
   },
   "note": {

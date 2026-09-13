@@ -147,7 +147,14 @@ export interface ClipboardItemQuery {
   sort?: ClipboardItemSort;
   limit?: number;
   offset?: number;
+  /** true 时跳过同过滤的 COUNT，`total` 返回 -1（未计算哨兵），沿用本地缓存值。 */
+  skipCount?: boolean;
 }
+
+/**
+ * `skipCount` 查询下 `total` 的哨兵值：本次未计算，前端沿用上次 total。
+ */
+export const CLIPBOARD_TOTAL_SKIPPED = -1;
 
 /**
  * 列表查询的一页结果，Rust 直接给出 `total` 与 `hasMore`，

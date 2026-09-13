@@ -67,6 +67,7 @@
     "openPreference": "Preferences",
     "pin": "Pin window",
     "searchPlaceholder": "Search clipboard...",
+    "shortKeywordHint": "Type at least 3 characters for fast search",
     "unpin": "Unpin"
   },
   "note": {

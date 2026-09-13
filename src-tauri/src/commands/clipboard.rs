@@ -552,7 +552,13 @@ pub async fn list_clipboard_items(
         redact_sensitive_list_item(item, redact_sensitive);
         item.available_actions = compute_available_actions(item);
     }
-    let has_more = q.offset + (items.len() as i64) < total;
+    // COUNT 路径精确判定（offset + len < total）；skip_count 路径长度判定
+    // （len == limit 即可能还有下一页）。整除页最坏多一次空请求，换每页省一条 COUNT。
+    let has_more = if total == crate::db::items::TOTAL_SKIPPED_SENTINEL {
+        items.len() as i64 == q.limit
+    } else {
+        q.offset + (items.len() as i64) < total
+    };
     Ok(ClipboardItemPage {
         list: items,
         total,

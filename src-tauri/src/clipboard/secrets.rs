@@ -164,4 +164,36 @@ mod tests {
             "AKIA is just a word without enough characters"
         ));
     }
+
+    /// 字面近似样本不得误报：各检测分支的「必要字面出现但结构不完整」的
+    /// 干扰样本逐一放行，锁住正则收紧边界不被无意放宽。
+    #[test]
+    fn literal_lookalikes_do_not_trigger_false_positives() {
+        assert!(!contains_secret("-----BEGIN CERTIFICATE-----"));
+        assert!(!contains_secret("-----BEGIN PUBLIC KEY-----"));
+        assert!(!contains_secret("ghost story about gh_ short"));
+        assert!(!contains_secret("my_token_value"));
+        assert!(!contains_secret("AKIAIOSFODNN7EXAMPL"));
+        assert!(!contains_secret("eyJhbGciOiJIUzI1NiJ9"));
+        assert!(!contains_secret("api_key = tooshort"));
+        assert!(!contains_secret("bearer: abc"));
+    }
+
+    /// 大小写不敏感的正样本：`(?i)` 分支的 ASCII 大写变体同样命中。
+    #[test]
+    fn uppercase_variants_are_detected() {
+        let upper_labeled = ["API_KEY", " = abcdefghijklmnopqrstuvwxyz123456"].concat();
+        let mixed_jwt = [
+            "EYJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+            ".eyJzdWIiOiIxMjM0NTY3ODkwIn0",
+            ".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+        ]
+        .concat();
+
+        assert!(contains_secret(&upper_labeled));
+        assert!(
+            !contains_secret(&mixed_jwt),
+            "JWT 头段 eyJ 是大小写敏感特征"
+        );
+    }
 }

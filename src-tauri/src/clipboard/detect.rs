@@ -43,30 +43,50 @@ static GRADIENT_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("invalid gradient regex")
 });
 
+/// 子类型识别的长度闸门：URL/email/color/path 都是行级短特征，超长文本几乎必然
+/// 是普通长文；只取前 4KB 判定，避免 4MB 级复制内容全串跑正则。
+const DETECT_MAX_BYTES: usize = 4096;
+
 /// 识别纯文本的子类型。判定顺序：url > email > color > path。
 /// 均不命中返回 `None`（普通文本）。
 ///
-/// 注意：`path` 分支会触碰文件系统（`exists`），且仅认**绝对路径**——
-/// 相对路径的存在性取决于进程 cwd（监听线程下不可控），收紧以避免误判。
+/// 性能约束（监听热路径）：超 [`DETECT_MAX_BYTES`] 的文本只识别前 4KB；
+/// `path` 分支只判定「看起来像绝对路径」的形态（`is_absolute`），**不做 `exists()**
+/// 文件系统调用——存在性校验延后到 Reveal / 预览动作执行时（届时打开资源管理器
+/// 本来就会失败提示）。相对路径仍不判（存在性取决于进程 cwd，误判面大）。
 pub fn detect_text_sub_kind(text: &str) -> Option<ClipboardSubKind> {
     let value = text.trim();
     if value.is_empty() {
         return None;
     }
 
-    if URL_RE.is_match(value) {
+    let head = truncate_head_bytes(value);
+    if URL_RE.is_match(head) {
         return Some(ClipboardSubKind::Url);
     }
-    if EMAIL_RE.is_match(value) {
+    if EMAIL_RE.is_match(head) {
         return Some(ClipboardSubKind::Email);
     }
-    if is_css_color_value(value) {
+    if is_css_color_value(head) {
         return Some(ClipboardSubKind::Color);
     }
-    if is_existing_absolute_path(value) {
+    if Path::new(head).is_absolute() {
         return Some(ClipboardSubKind::Path);
     }
     None
+}
+
+/// 截取文本头部的字节上限切片；UTF-8 边界处回退到最近完整字符。
+fn truncate_head_bytes(value: &str) -> &str {
+    if value.len() <= DETECT_MAX_BYTES {
+        return value;
+    }
+
+    let mut end = DETECT_MAX_BYTES;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 /// 把任意字符串规范化为可信的 CSS 颜色串：trim 后必须命中颜色 / 渐变规则
@@ -129,11 +149,6 @@ fn is_safe_css_value(value: &str) -> bool {
     }
 
     depth == 0
-}
-
-fn is_existing_absolute_path(value: &str) -> bool {
-    let path = Path::new(value);
-    path.is_absolute() && path.exists()
 }
 
 #[cfg(test)]
@@ -278,19 +293,99 @@ mod tests {
     }
 
     #[test]
-    fn detects_existing_absolute_path_only() {
+    fn detects_absolute_path_by_shape_without_fs_access() {
         let dir = std::env::temp_dir();
         let file = dir.join(format!("ecopaste-detect-{}.txt", uuid::Uuid::new_v4()));
         std::fs::write(&file, b"x").unwrap();
 
+        // 存在与否都判 path：识别只看绝对路径形态，exists() 延后到动作执行。
         assert_eq!(
             detect_text_sub_kind(file.to_str().unwrap()),
             Some(ClipboardSubKind::Path)
         );
-        // 不存在的绝对路径、相对路径都不判 path。
-        assert_eq!(detect_text_sub_kind("/nope/does/not/exist/xyz"), None);
+        // 平台本位的绝对路径形态（Windows 带盘符、macOS 带根斜杠）。
+        let non_existing = if cfg!(windows) {
+            "C:\\nope\\does\\not\\exist\\xyz"
+        } else {
+            "/nope/does/not/exist/xyz"
+        };
+        assert_eq!(
+            detect_text_sub_kind(non_existing),
+            Some(ClipboardSubKind::Path)
+        );
+        // 相对路径不判。
         assert_eq!(detect_text_sub_kind("src"), None);
 
         std::fs::remove_file(&file).ok();
+    }
+
+    #[test]
+    fn long_text_only_scans_head() {
+        // 4MB 多行普通文本：不命中任何子类型（URL/email/color 都是单行整串特征，
+        // 多行长文天然不命中；闸门保证只扫前 4KB 而非全串）。
+        let mut long_plain = String::from("普通文本行\n");
+        while long_plain.len() < 4 * 1024 * 1024 {
+            long_plain.push_str("更多普通文本内容，不构成任何子类型特征。\n");
+        }
+        assert_eq!(detect_text_sub_kind(&long_plain), None);
+
+        // 4MB 单行超长 URL（trim 后整串仍是合法 URL 形态）：头部截断后 URL 前缀
+        // + 无空白仍命中——证明截断不破坏行首特征识别。
+        let long_url = format!("https://example.com/{}", "a".repeat(4 * 1024 * 1024));
+        assert_eq!(detect_text_sub_kind(&long_url), Some(ClipboardSubKind::Url));
+
+        // 多字节截断：4KB 边界落在 UTF-8 字符中间时回退到完整字符边界，不 panic。
+        let cjk_tail = "中文内容重复";
+        let mut multi_byte = String::new();
+        while multi_byte.len() < 4096 + 16 {
+            multi_byte.push_str(cjk_tail);
+        }
+        assert_eq!(detect_text_sub_kind(&multi_byte), None);
+    }
+
+    /// 监听热路径微基准（手动跑：`cargo test --release --lib hot_path_bench -- --ignored --nocapture`）。
+    /// 覆盖 4MB 无特征普通文本与 4MB 高频含 label 词的最坏文本两类形态。
+    /// 基线（2026-09 实测，release 10 轮）：普通 ~9ms / 最坏 ~51ms；
+    /// secrets 曾试验「字面预筛 + 窗口正则」，实测（16ms / 69ms）反而更慢——
+    /// regex crate 本身已高度优化，故回退；本基准保留用于防回归与后续优化的对照。
+    /// debug 构建受无优化惩罚主导，性能结论以 release 为准。
+    #[test]
+    #[ignore = "manual microbenchmark; run with --release"]
+    fn hot_path_bench_large_plain_text() {
+        use std::time::Instant;
+
+        let mut plain = String::from("普通文本起始行\n");
+        while plain.len() < 4 * 1024 * 1024 {
+            plain.push_str("普通剪贴板正文内容，没有任何英文关键词。\n");
+        }
+
+        let start = Instant::now();
+        for _ in 0..10 {
+            assert_eq!(detect_text_sub_kind(&plain), None);
+            assert!(!super::super::secrets::contains_secret(&plain));
+        }
+        let plain_elapsed = start.elapsed();
+        println!("10x (detect+secret) on 4MB plain text: {plain_elapsed:?}");
+
+        let mut worst = String::from("普通文本起始行\n");
+        while worst.len() < 4 * 1024 * 1024 {
+            worst.push_str("普通剪贴板正文内容，不含任何 secret 或子类型特征 token。\n");
+        }
+        let start = Instant::now();
+        for _ in 0..10 {
+            assert_eq!(detect_text_sub_kind(&worst), None);
+            assert!(!super::super::secrets::contains_secret(&worst));
+        }
+        let worst_elapsed = start.elapsed();
+        println!("10x (detect+secret) on 4MB label-heavy text: {worst_elapsed:?}");
+
+        assert!(
+            plain_elapsed.as_millis() < 100,
+            "plain-text hot path regression: {plain_elapsed:?}"
+        );
+        assert!(
+            worst_elapsed.as_millis() < 500,
+            "worst-case hot path regression: {worst_elapsed:?}"
+        );
     }
 }

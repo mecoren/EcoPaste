@@ -7,6 +7,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
 use anyhow::Context;
@@ -24,6 +25,10 @@ const FILENAME: &str = "settings.json";
 pub struct SettingsStore {
     path: RwLock<PathBuf>,
     current: RwLock<Settings>,
+    /// 设置变更代次：`update` / `reset` / `replace_from_file` / `rebase` 时自增。
+    /// 周期任务（如历史清理 tick）用它做「版本未变 → 跳过 snapshot 深拷」的廉价比对，
+    /// 避免每次 tick 都克隆整个 Settings 结构。
+    version: AtomicU64,
 }
 
 impl SettingsStore {
@@ -49,7 +54,14 @@ impl SettingsStore {
         Ok(Self {
             path: RwLock::new(path),
             current: RwLock::new(current),
+            version: AtomicU64::new(1),
         })
+    }
+
+    /// 当前设置代次。后台周期任务比对「上次看到的代次」判断设置是否变过，
+    /// 未变时不必 `snapshot()` 深拷整个 Settings。
+    pub fn version(&self) -> u64 {
+        self.version.load(Ordering::Acquire)
     }
 
     pub fn snapshot(&self) -> Settings {
@@ -63,6 +75,7 @@ impl SettingsStore {
         let path = self.path();
         write_atomic(&path, &next)?;
         *self.current.write().expect("settings poisoned") = next.clone();
+        self.version.fetch_add(1, Ordering::Release);
         Ok(next)
     }
 
@@ -89,6 +102,7 @@ impl SettingsStore {
         let path = self.path();
         write_atomic(&path, &next)?;
         *guard = next.clone();
+        self.version.fetch_add(1, Ordering::Release);
         Ok(next)
     }
 
@@ -104,6 +118,7 @@ impl SettingsStore {
         let path = self.path();
         write_atomic(&path, &next)?;
         *self.current.write().expect("settings poisoned") = next.clone();
+        self.version.fetch_add(1, Ordering::Release);
         Ok(next)
     }
 
@@ -123,6 +138,7 @@ impl SettingsStore {
 
         *self.path.write().expect("settings path poisoned") = path;
         *self.current.write().expect("settings poisoned") = current.clone();
+        self.version.fetch_add(1, Ordering::Release);
         Ok(current)
     }
 
@@ -302,6 +318,43 @@ mod tests {
         settings.shortcuts.open_preference = String::new();
 
         assert!(validate_settings(&settings).is_ok());
+    }
+
+    /// 直接构造带版本计数与临时文件的 store，供版本号语义测试复用。
+    fn store_for_version_test() -> (tempfile::TempDir, SettingsStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore {
+            path: RwLock::new(dir.path().join(FILENAME)),
+            current: RwLock::new(Settings::default()),
+            version: AtomicU64::new(1),
+        };
+        (dir, store)
+    }
+
+    #[test]
+    fn version_increments_on_each_mutation() {
+        let (_dir, store) = store_for_version_test();
+        let before = store.version();
+
+        // 同一 patch 再写：内容不变也自增（代次只关心「发生过写」，不 diff 内容），
+        // 保证消费方（cleanup tick）宁可多取一次快照也不漏变更。
+        store
+            .update(serde_json::json!({"general": {"trayIcon": true}}))
+            .unwrap();
+        let after_update = store.version();
+        assert_eq!(after_update, before + 1);
+
+        store.reset().unwrap();
+        assert_eq!(store.version(), after_update + 1);
+    }
+
+    #[test]
+    fn version_stable_when_no_mutation() {
+        let (_dir, store) = store_for_version_test();
+        let _ = store.snapshot();
+
+        // 只读 snapshot 不改变代次——tick 比对依赖这一点。
+        assert_eq!(store.version(), store.version());
     }
 
     #[test]
