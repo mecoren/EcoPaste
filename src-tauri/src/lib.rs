@@ -21,6 +21,12 @@ mod window;
 
 use tauri::{Manager, WindowEvent};
 
+/// 全局分配器换 mimalloc：对监听入库、列表 enrich、缩略图生成这类高 churn 场景
+/// 有 5-20% 长尾 RSS 收益，Windows 碎片化尤其明显。只作用于本进程，WebView
+/// 进程有独立堆不受影响。
+#[global_allocator]
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     admin::handle_startup_auto_elevation();

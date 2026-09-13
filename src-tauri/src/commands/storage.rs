@@ -205,6 +205,11 @@ pub async fn clean_resource_cache(
         &image_files,
         &mut removed,
     )?;
+    clean_sharded_files(
+        &resources_dir.join("clipboard-images").join("previews"),
+        &image_files,
+        &mut removed,
+    )?;
     clean_flat_files(
         &resources_dir.join("app-icons"),
         &app_icon_files,

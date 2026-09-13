@@ -4,14 +4,15 @@
 //! ```text
 //! <app_local_data>/resources/clipboard-images/
 //!   origin/<hash[..2]>/<hash>.png       原图（PNG），复制时落盘
-//!   thumbnails/<hash[..2]>/<hash>.png   缩略图（PNG，最长边 <= THUMBNAIL_MAX），首次预览时按需生成
+//!   thumbnails/<hash[..2]>/<hash>.png   缩略图（PNG，最长边 <= THUMBNAIL_MAX），列表首次取图时按需生成
+//!   previews/<hash[..2]>/<hash>.png     预览档（PNG，最长边 <= PREVIEW_MAX），预览窗口首次取图时按需生成
 //! ```
 //! 文件名取「PNG 字节的 blake3」：同一张图重复复制 → 同字节 → 同文件名，落盘幂等，
 //! 且与去重指纹同源（image 的 `content_hash` 即对 PNG 字节哈希）。
 //! 按 hash 前 2 位 hex 分 256 个子目录，避免重度使用下单目录文件爆量。
 //!
-//! 缩略图的解码/缩放/编码不在复制热路径上——`store` 只写原图，缩略图由
-//! [`ImageStore::ensure_thumbnail`] 在前端首次取图时懒生成并缓存。
+//! 缩略图与预览档的解码/缩放/编码不在复制热路径上——`store` 只写原图，两档由
+//! [`ImageStore::ensure_thumbnail`] / [`ImageStore::ensure_preview`] 在前端首次取图时懒生成。
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -24,13 +25,17 @@ use tauri::AppHandle;
 use super::payload::ImagePayload;
 use crate::core::{AppError, Result};
 
-/// 缩略图最长边像素。仅用于列表预览，够清晰即可。
+/// 缩略图最长边像素。仅用于列表卡片，够清晰即可。
 const THUMBNAIL_MAX: u32 = 300;
+
+/// 预览档最长边像素。预览面板上限 480px，覆盖 2x DPI 即 960；原图只在灯箱放大时使用。
+const PREVIEW_MAX: u32 = 960;
 
 /// 剪贴板图片目录名，挂在 `core::paths::resources_dir` 下（与 `app-icons` 并列）。
 const IMAGES_DIR: &str = "clipboard-images";
 const ORIGIN_DIR: &str = "origin";
 const THUMBNAILS_DIR: &str = "thumbnails";
+const PREVIEWS_DIR: &str = "previews";
 
 /// 一次图片落盘的结果，交给 ingest 写入 `ClipboardItem`。
 pub struct StoredImage {
@@ -103,33 +108,50 @@ impl ImageStore {
     /// 供 `get_clipboard_image_path(thumbnail=true)` 调用。把生成放在「读」而非「写」侧，
     /// 既将解码/编码移出复制热路径，又因「返回前文件已确保存在」天然避免前端加载到半成品文件。
     pub fn ensure_thumbnail(&self, file_name: &str) -> Result<PathBuf> {
-        let thumb_path = self.thumbnail_path(file_name);
-        if thumb_path.exists() {
-            return Ok(thumb_path);
+        self.ensure_scaled("thumbnail", THUMBNAIL_MAX, &self.thumbnail_path(file_name))
+    }
+
+    /// 确保预览档存在并返回其绝对路径，生成模式与缩略图一致（懒生成 + 幂等缓存）。
+    /// 预览窗口用预览档渲染，避免 480px 面板解码整张原图的瞬时内存尖峰。
+    pub fn ensure_preview(&self, file_name: &str) -> Result<PathBuf> {
+        self.ensure_scaled("preview", PREVIEW_MAX, &self.preview_path(file_name))
+    }
+
+    /// 懒生成某一档缩放图：已存在直接返回；否则读原图 → 缩放 → 编码 → 落盘。
+    fn ensure_scaled(&self, label: &str, max_edge: u32, path: &Path) -> Result<PathBuf> {
+        if path.exists() {
+            return Ok(path.to_path_buf());
         }
 
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| AppError::Clipboard("image file name is not valid utf-8".to_owned()))?;
         let origin_path = self.origin_path(file_name);
         let origin_bytes = std::fs::read(&origin_path)
             .with_context(|| format!("failed to read origin image {origin_path:?}"))?;
-        let thumb_bytes = encode_thumbnail(&origin_bytes)?;
-        write_if_absent(&thumb_path, &thumb_bytes)?;
-        Ok(thumb_path)
+        let scaled_bytes = encode_scaled_png(&origin_bytes, max_edge, label)?;
+        write_if_absent(path, &scaled_bytes)?;
+        Ok(path.to_path_buf())
     }
 
-    /// 删除一张图片的原图与缩略图。缩略图懒生成、可能不存在，缺失文件视作成功（幂等）。
-    /// 删后顺手清理变空的分片目录（`origin/<ab>`、`thumbnails/<ab>`）。
+    /// 删除一张图片的原图、缩略图与预览档。缩略图 / 预览档懒生成、可能不存在，
+    /// 缺失文件视作成功（幂等）。删后顺手清理变空的分片目录。
     ///
     /// 调用前提：库里该图至多一行（image 去重指纹源自 PNG 字节，落盘文件名即字节哈希），
     /// 故删行后该文件必为孤儿，可直接删，无需引用计数。其余 IO 错误上抛由调用方记日志。
     pub fn remove(&self, file_name: &str) -> Result<()> {
         let origin = self.origin_path(file_name);
         let thumb = self.thumbnail_path(file_name);
+        let preview = self.preview_path(file_name);
         remove_if_present(&origin)?;
         remove_if_present(&thumb)?;
+        remove_if_present(&preview)?;
         // 分片目录可能被同前缀的其他图共享，非空时保留——remove_dir 只删空目录，
         // 非空 / 不存在都返回 Err，一并忽略；目录清理是尽力而为，不影响删图结果。
         remove_dir_if_empty(origin.parent());
         remove_dir_if_empty(thumb.parent());
+        remove_dir_if_empty(preview.parent());
         Ok(())
     }
 
@@ -141,6 +163,11 @@ impl ImageStore {
     /// 由文件名解析缩略图绝对路径。供前端预览取图。
     pub fn thumbnail_path(&self, file_name: &str) -> PathBuf {
         self.shard_path(THUMBNAILS_DIR, shard_key(file_name), file_name)
+    }
+
+    /// 由文件名解析预览档绝对路径。供预览窗口取图（灯箱放大仍走原图路径）。
+    pub fn preview_path(&self, file_name: &str) -> PathBuf {
+        self.shard_path(PREVIEWS_DIR, shard_key(file_name), file_name)
     }
 
     fn shard_path(&self, kind_dir: &str, shard_src: &str, file_name: &str) -> PathBuf {
@@ -211,17 +238,27 @@ fn remove_dir_if_empty(dir: Option<&Path>) {
     }
 }
 
-/// 把原图 PNG 字节解码 → 生成缩略图（最长边 <= [`THUMBNAIL_MAX`]，保持比例）→ 重新编码 PNG。
-fn encode_thumbnail(png_bytes: &[u8]) -> Result<Vec<u8>> {
-    let image = RustImageData::from_bytes(png_bytes).map_err(clip_err)?;
-    let thumb = image
-        .thumbnail(THUMBNAIL_MAX, THUMBNAIL_MAX)
-        .map_err(clip_err)?;
-    Ok(thumb.to_png().map_err(clip_err)?.get_bytes().to_vec())
-}
+/// 把原图 PNG 字节解码 → 生成缩放图（最长边 <= `max_edge`，保持比例）→ 重新编码 PNG。
+/// `label` 仅用于错误信息区分档位。image 的 `thumbnail` 只按比例取 min、不封顶放大
+/// （400px 原图会拉到 960px），这里先判原图最长边，只缩不放。
+fn encode_scaled_png(png_bytes: &[u8], max_edge: u32, label: &str) -> Result<Vec<u8>> {
+    let image = RustImageData::from_bytes(png_bytes)
+        .map_err(|err| AppError::Clipboard(format!("decode origin for {label} failed: {err}")))?;
 
-fn clip_err<E: std::fmt::Display>(err: E) -> AppError {
-    AppError::Clipboard(err.to_string())
+    let (width, height) = image.get_size();
+    let scaled = if width <= max_edge && height <= max_edge {
+        image
+    } else {
+        image
+            .thumbnail(max_edge, max_edge)
+            .map_err(|err| AppError::Clipboard(format!("scale to {label} failed: {err}")))?
+    };
+
+    Ok(scaled
+        .to_png()
+        .map_err(|err| AppError::Clipboard(format!("encode {label} failed: {err}")))?
+        .get_bytes()
+        .to_vec())
 }
 
 #[cfg(test)]
@@ -301,6 +338,57 @@ mod tests {
     }
 
     #[test]
+    fn ensure_preview_generates_then_caches() {
+        let (_dir, store) = temp_store();
+        let payload = ImagePayload {
+            bytes: sample_png(1200, 800),
+            width: 1200,
+            height: 800,
+        };
+        let stored = store.store(&payload).unwrap();
+
+        // 预览档长边应缩到 <= PREVIEW_MAX；缩略图档互不干扰。
+        let preview = store.ensure_preview(&stored.file_name).unwrap();
+        assert!(preview.exists(), "preview should be generated: {preview:?}");
+        assert_eq!(preview, store.preview_path(&stored.file_name));
+        assert!(
+            !store.thumbnail_path(&stored.file_name).exists(),
+            "thumbnail tier should not be touched by ensure_preview"
+        );
+
+        let decoded = image::load_from_memory(&std::fs::read(&preview).unwrap()).unwrap();
+        assert!(decoded.width() <= PREVIEW_MAX);
+        assert!(decoded.height() <= PREVIEW_MAX);
+
+        // 幂等缓存。
+        let preview2 = store.ensure_preview(&stored.file_name).unwrap();
+        assert_eq!(preview, preview2);
+    }
+
+    #[test]
+    fn ensure_preview_keeps_small_image_unscaled() {
+        let (_dir, store) = temp_store();
+        // 原图本来就小于 960px：不放大，像素保持原尺寸。
+        let payload = ImagePayload {
+            bytes: sample_png(400, 300),
+            width: 400,
+            height: 300,
+        };
+        let stored = store.store(&payload).unwrap();
+
+        let preview = store.ensure_preview(&stored.file_name).unwrap();
+        let decoded = image::load_from_memory(&std::fs::read(&preview).unwrap()).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (400, 300));
+    }
+
+    #[test]
+    fn ensure_preview_errors_when_origin_missing() {
+        let (_dir, store) = temp_store();
+        let result = store.ensure_preview("0000000000000000.png");
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn ensure_thumbnail_errors_when_origin_missing() {
         let (_dir, store) = temp_store();
         // 原图从未落盘：ensure_thumbnail 读不到原图，报错而非 panic。
@@ -334,14 +422,17 @@ mod tests {
         };
         let stored = store.store(&payload).unwrap();
         store.ensure_thumbnail(&stored.file_name).unwrap();
+        store.ensure_preview(&stored.file_name).unwrap();
 
         let origin = store.origin_path(&stored.file_name);
         let thumb = store.thumbnail_path(&stored.file_name);
-        assert!(origin.exists() && thumb.exists());
+        let preview = store.preview_path(&stored.file_name);
+        assert!(origin.exists() && thumb.exists() && preview.exists());
 
         store.remove(&stored.file_name).unwrap();
         assert!(!origin.exists(), "origin should be removed");
         assert!(!thumb.exists(), "thumbnail should be removed");
+        assert!(!preview.exists(), "preview tier should be removed");
         // 分片目录已空 → 一并清理。
         assert!(
             !origin.parent().unwrap().exists(),
@@ -350,6 +441,10 @@ mod tests {
         assert!(
             !thumb.parent().unwrap().exists(),
             "empty thumbnail shard dir should be removed"
+        );
+        assert!(
+            !preview.parent().unwrap().exists(),
+            "empty preview shard dir should be removed"
         );
 
         // 再次删除：文件已不存在，仍成功（幂等）。
@@ -414,6 +509,14 @@ mod tests {
             store
                 .images_root()
                 .join("thumbnails")
+                .join("ab")
+                .join(file_name)
+        );
+        assert_eq!(
+            store.preview_path(file_name),
+            store
+                .images_root()
+                .join("previews")
                 .join("ab")
                 .join(file_name)
         );

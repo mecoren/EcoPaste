@@ -1075,7 +1075,17 @@ async fn build_clipboard_preview_payload(
         }
         ClipboardKind::Image => {
             validate_image_file_name(&item.content)?;
-            let path = image_store.origin_path(&item.content);
+            // 预览面板用 960px 预览档渲染（面板上限 480px，覆盖 2x DPI），避免解码
+            // 整张原图的瞬时内存尖峰；懒生成与缩略图同模式（返回前文件已确保存在）。
+            // 原图路径仅灯箱放大（P3-1）使用。meta 的宽高 / size 仍来自原图记录，不失真。
+            let store = image_store.clone();
+            let file_name = item.content.clone();
+            let path =
+                tauri::async_runtime::spawn_blocking(move || store.ensure_preview(&file_name))
+                    .await
+                    .map_err(|err| {
+                        AppError::Clipboard(format!("preview image task join failed: {err}"))
+                    })??;
             image_exists = path.exists();
             image_path = Some(path_to_string(&path, "image path")?);
         }

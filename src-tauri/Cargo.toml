@@ -30,6 +30,7 @@ thiserror = "2"
 anyhow = "1"
 tauri-plugin-log = "2"
 log = "0.4"
+mimalloc = "0.1"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "chrono", "migrate"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 blake3 = "1"
