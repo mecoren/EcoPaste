@@ -331,6 +331,23 @@
         }
       },
       "diagnostics": {
+        "processMemory": {
+          "controlLabel": "查看",
+          "description": "查看主进程与当前窗口的内存占用，用于排查后台资源问题。",
+          "modalTitle": "进程内存",
+          "process": {
+            "hint": "主进程承载剪贴板监听、数据库与设置持久化；该数字只统计 EcoPaste 主程序本身，不含各网页视图进程。",
+            "rss": "主进程驻留内存（RSS）",
+            "virtual": "主进程虚拟内存"
+          },
+          "refresh": "刷新",
+          "title": "进程内存",
+          "webview": {
+            "hint": "网页视图进程的 JS 堆占用，由系统 WebView（Windows WebView2 / macOS WKWebView）上报；当前环境不支持时显示 N/A。",
+            "jsHeap": "JS 堆占用",
+            "jsHeapLimit": "JS 堆上限"
+          }
+        },
         "resetPreferences": {
           "confirmContent": "这会恢复所有偏好默认值，但不会删除剪贴板历史记录。",
           "confirmTitle": "重置所有偏好？",
@@ -411,10 +428,10 @@
         },
         "compactDatabase": {
           "confirmContent": "压缩会重建数据库文件以回收删除记录留下的空洞，期间应用可能短暂无响应，需要约等于数据库大小的临时磁盘空间。",
-          "confirmTitle": "压缩数据库",
-          "controlLabel": "压缩数据库",
-          "description": "重建数据库文件，回收删除记录留下的磁盘空洞并收缩 WAL。",
-          "title": "压缩数据库"
+          "confirmTitle": "压缩数据库与图片缓存",
+          "controlLabel": "压缩数据库与图片缓存",
+          "description": "重建数据库文件，回收删除记录留下的磁盘空洞并收缩 WAL；大批量历史清理后会自动收缩 WAL。",
+          "title": "压缩数据库与图片缓存"
         },
         "dataDirectory": {
           "controlLabel": "打开",

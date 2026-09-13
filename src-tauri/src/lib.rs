@@ -178,6 +178,7 @@ pub fn run() {
             commands::clean_resource_cache,
             commands::compact_database,
             commands::open_preference_directory,
+            commands::get_process_memory_stats,
             commands::get_autostart,
             commands::set_autostart,
             commands::get_update_status,

@@ -331,6 +331,23 @@
         }
       },
       "diagnostics": {
+        "processMemory": {
+          "controlLabel": "View",
+          "description": "Inspect main-process and current-window memory usage for troubleshooting background resources.",
+          "modalTitle": "Process Memory",
+          "process": {
+            "hint": "The main process hosts clipboard watching, database, and settings persistence; this number covers the EcoPaste binary only, excluding webview processes.",
+            "rss": "Main-process resident memory (RSS)",
+            "virtual": "Main-process virtual memory"
+          },
+          "refresh": "Refresh",
+          "title": "Process Memory",
+          "webview": {
+            "hint": "JS heap usage of the webview process, reported by the system WebView (Windows WebView2 / macOS WKWebView); shows N/A when unsupported.",
+            "jsHeap": "JS heap usage",
+            "jsHeapLimit": "JS heap limit"
+          }
+        },
         "resetPreferences": {
           "confirmContent": "This restores every preference to its default value, but keeps clipboard history records.",
           "confirmTitle": "Reset all preferences?",
@@ -411,10 +428,10 @@
         },
         "compactDatabase": {
           "confirmContent": "Compacting rebuilds the database file to reclaim space left by deleted records. The app may be briefly unresponsive and needs temporary disk space roughly equal to the database size.",
-          "confirmTitle": "Compact Database",
-          "controlLabel": "Compact Database",
-          "description": "Rebuild the database file to reclaim disk space left by deleted records and shrink the WAL.",
-          "title": "Compact Database"
+          "confirmTitle": "Compact Database & Image Cache",
+          "controlLabel": "Compact Database & Image Cache",
+          "description": "Rebuild the database file to reclaim disk space left by deleted records and shrink the WAL; the WAL also shrinks automatically after large history cleanups.",
+          "title": "Compact Database & Image Cache"
         },
         "dataDirectory": {
           "controlLabel": "Open",

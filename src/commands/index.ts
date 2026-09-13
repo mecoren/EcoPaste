@@ -149,6 +149,11 @@ export interface StorageUsage {
   settingsBytes: number;
 }
 
+export interface MemoryStats {
+  rssBytes: number;
+  virtualBytes: number;
+}
+
 export interface CleanCacheResult {
   removedFiles: number;
   removedBytes: number;
@@ -559,6 +564,16 @@ export const getStorageLocation = () => {
   return call<StorageLocation>(
     TAURI_COMMAND.GET_STORAGE_LOCATION,
     "commands:labels.loadStorageLocation",
+  );
+};
+
+/**
+ * 读取当前 Rust 进程的内存占用，用于诊断面板。
+ */
+export const getProcessMemoryStats = () => {
+  return call<MemoryStats>(
+    TAURI_COMMAND.GET_PROCESS_MEMORY_STATS,
+    "commands:labels.loadProcessMemoryStats",
   );
 };
 

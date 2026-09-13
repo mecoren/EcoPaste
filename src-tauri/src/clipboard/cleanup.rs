@@ -17,6 +17,10 @@ use crate::settings::{Retention, RetentionUnit, SettingsStore};
 /// 调度器检查设置与到期状态的频率；真正清理只在用户设置周期到期后执行。
 const SCHEDULER_TICK_INTERVAL: Duration = Duration::from_secs(60);
 
+/// 单次清理删除行数达到该阈值时，清理完成后自动做一次 WAL truncate checkpoint，
+/// 回收大量 DELETE 留下的 WAL 累积；低于阈值不动，避免高频小清理的 IO 抖动。
+const WAL_CHECKPOINT_THRESHOLD_ROWS: u64 = 500;
+
 /// 启动历史清理后台任务：启动立即清理一次，之后按设置周期到点清理。
 pub fn spawn(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
@@ -60,6 +64,7 @@ async fn run_once(app: &AppHandle) {
         Ok(outcome) => {
             remove_images(app, &outcome.image_files);
             log::info!("history cleanup removed {} item(s)", outcome.removed);
+            checkpoint_if_bulk(&pool, outcome.removed).await;
             if let Err(err) = app.emit(
                 CLIPBOARD_UPDATED_EVENT,
                 json!({ "cleanup": outcome.removed }),
@@ -68,6 +73,22 @@ async fn run_once(app: &AppHandle) {
             }
         }
         Err(err) => log::warn!("history cleanup failed: {err}"),
+    }
+}
+
+/// 大批量删除后截断 WAL 回收磁盘；在线操作、毫秒级，失败只记日志不影响清理结果。
+/// VACUUM 仍保持手动（设置页「压缩数据库」），自动 VACUUM 有锁库风险。
+async fn checkpoint_if_bulk(pool: &sqlx::SqlitePool, removed: u64) {
+    if removed < WAL_CHECKPOINT_THRESHOLD_ROWS {
+        return;
+    }
+
+    match sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(pool)
+        .await
+    {
+        Ok(_) => log::info!("wal truncated after bulk cleanup ({removed} rows removed)"),
+        Err(err) => log::warn!("wal truncate after bulk cleanup failed: {err}"),
     }
 }
 
@@ -125,6 +146,62 @@ mod tests {
 
     fn now() -> DateTime<Utc> {
         DateTime::from_timestamp(1_700_000_000, 0).unwrap()
+    }
+
+    /// 大批量删除（≥ 阈值）后 checkpoint 把 WAL 截断到 0 页；小批量不触发。
+    /// 在真实 sqlx/libsqlite3 运行时上执行与 `run_once` 相同的 SQL 路径。
+    #[tokio::test]
+    async fn checkpoint_if_bulk_truncates_wal_only_above_threshold() {
+        use sqlx::sqlite::SqliteConnectOptions;
+        use std::str::FromStr;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("checkpoint-test.db");
+        let wal_path = dir.path().join("checkpoint-test.db-wal");
+        let options = SqliteConnectOptions::from_str(db_path.to_str().unwrap())
+            .unwrap()
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+
+        sqlx::query("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        for i in 0..600 {
+            sqlx::query("INSERT INTO t (v) VALUES (?)")
+                .bind(format!("row-{i}"))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        sqlx::query("DELETE FROM t WHERE id <= 100")
+            .execute(&pool)
+            .await
+            .unwrap();
+        checkpoint_if_bulk(&pool, 100).await;
+        assert!(wal_size(&wal_path) > 0, "低于阈值的清理不应截断 WAL");
+
+        sqlx::query("DELETE FROM t").execute(&pool).await.unwrap();
+        checkpoint_if_bulk(&pool, 500).await;
+        assert_eq!(
+            wal_size(&wal_path),
+            0,
+            "达到阈值后 WAL 应被 truncate checkpoint 清零"
+        );
+
+        pool.close().await;
+    }
+
+    /// WAL sidecar 文件字节数；TRUNCATE checkpoint 后归零。文件不存在按 0 处理。
+    fn wal_size(path: &std::path::Path) -> u64 {
+        std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
     }
 
     #[test]

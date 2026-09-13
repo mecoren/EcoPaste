@@ -40,6 +40,15 @@ pub struct CleanCacheResult {
 /// 当前数据目录位置及是否已切到自定义目录。
 pub type StorageLocation = crate::core::paths::StorageLocation;
 
+/// 当前 Rust 进程的内存占用，供偏好页诊断面板展示。
+pub type MemoryStats = crate::core::metrics::MemoryStats;
+
+/// 读取当前 Rust 进程的 RSS 与虚拟内存占用。
+#[tauri::command]
+pub async fn get_process_memory_stats() -> Result<MemoryStats> {
+    Ok(crate::core::metrics::process_memory())
+}
+
 /// 更改或还原数据目录后的刷新结果。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

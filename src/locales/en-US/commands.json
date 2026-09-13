@@ -45,6 +45,7 @@
     "loadClipboardList": "Load list",
     "loadPreviewContent": "Load preview content",
     "loadPreviewState": "Load preview state",
+    "loadProcessMemoryStats": "Load process memory",
     "loadRunAsAdminStatus": "Load administrator launch state",
     "loadSettings": "Load settings",
     "loadStorageLocation": "Load data directory",

@@ -1,4 +1,5 @@
 pub mod error;
+pub mod metrics;
 pub mod paths;
 pub mod prevent_default;
 #[cfg(target_os = "windows")]

@@ -822,6 +822,11 @@ export const preferenceTabs: PreferenceTab[] = [
         settings: [
           {
             control: { type: "action" },
+            id: "diagnostics.processMemory",
+            keywords: ["memory", "rss", "ram", "diagnostic"],
+          },
+          {
+            control: { type: "action" },
             id: "diagnostics.windowLifecycle",
             keywords: ["window", "lifecycle", "debug", "phase"],
           },

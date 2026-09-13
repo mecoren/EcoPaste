@@ -39,6 +39,7 @@ const SETTING_ICON_MAP: Record<string, string> = {
   "copy.plainDefault": "i-lucide:clipboard-copy",
   "copy.sound": "i-lucide:volume-2",
   "copy.updateOnReuse": "i-lucide:refresh-cw",
+  "diagnostics.processMemory": "i-lucide:memory-stick",
   "diagnostics.resetPreferences": "i-lucide:settings-2",
   "diagnostics.windowLifecycle": "i-lucide:activity",
   "history.cleanupIntervalHours": "i-lucide:timer-reset",

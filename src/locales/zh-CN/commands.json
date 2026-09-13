@@ -45,6 +45,7 @@
     "loadClipboardList": "加载列表",
     "loadPreviewContent": "加载预览内容",
     "loadPreviewState": "加载预览状态",
+    "loadProcessMemoryStats": "读取进程内存",
     "loadRunAsAdminStatus": "读取管理员启动状态",
     "loadSettings": "加载设置",
     "loadStorageLocation": "读取数据目录",

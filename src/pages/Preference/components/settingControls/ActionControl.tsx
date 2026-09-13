@@ -1,5 +1,6 @@
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open } from "@tauri-apps/plugin-dialog";
+import { useMount } from "ahooks";
 import type { TableColumnsType, TableProps } from "antd";
 import { Button, Modal, Space, Table, Tooltip } from "antd";
 import type { TFunction } from "i18next";
@@ -14,9 +15,11 @@ import {
   cleanResourceCache,
   compactDatabase,
   type ExportHistoryBackupResult,
+  getProcessMemoryStats,
   getWindowLifecycleSnapshot,
   inspectHistoryBackup,
   listClipboardGroups,
+  type MemoryStats,
   openExternalUrl,
   openOnboarding,
   openPreferenceDirectory,
@@ -36,6 +39,7 @@ import { getModalApi } from "@/utils/feedback";
 import { log } from "@/utils/log";
 import type { PreferenceSetting } from "../../types/preferences";
 import { translatePreferenceControlLabel } from "../../utils/preferenceI18n";
+import { formatBytes } from "../../utils/storageUsage";
 import BackupExportModal from "../BackupExportModal";
 import ClipboardGroupManagerModal from "../ClipboardGroupManagerModal";
 import ControlFrame from "./ControlFrame";
@@ -52,6 +56,7 @@ const IMPORT_BACKUP_SETTING_ID = "backup.importHistory";
 const LOG_DIRECTORY_SETTING_ID = "localData.logDirectory";
 const REOPEN_ONBOARDING_SETTING_ID = "control.reopenOnboarding";
 const RESET_PREFERENCES_SETTING_ID = "diagnostics.resetPreferences";
+const PROCESS_MEMORY_SETTING_ID = "diagnostics.processMemory";
 const WINDOW_LIFECYCLE_SETTING_ID = "diagnostics.windowLifecycle";
 const WINDOW_LIFECYCLE_I18N_PREFIX =
   "schema.settings.diagnostics.windowLifecycle";
@@ -112,6 +117,7 @@ const ActionControl: FC<ActionControlProps> = (props) => {
   const [lifecycleSnapshot, setLifecycleSnapshot] = useState<
     WindowLifecycleSnapshot[]
   >([]);
+  const [memoryModalOpen, setMemoryModalOpen] = useState(false);
   const windowLabel = getCurrentWebviewWindow().label;
 
   if (setting.control.type !== "action") return null;
@@ -293,6 +299,14 @@ const ActionControl: FC<ActionControlProps> = (props) => {
     }
   };
 
+  const openProcessMemoryDiagnostics = () => {
+    setMemoryModalOpen(true);
+  };
+
+  const closeMemoryModal = () => {
+    setMemoryModalOpen(false);
+  };
+
   /**
    * 选择 `.ecopastebak` 文件并交给 Rust 识别，识别事件会打开统一导入弹窗。
    */
@@ -414,6 +428,11 @@ const ActionControl: FC<ActionControlProps> = (props) => {
       return;
     }
 
+    if (setting.id === PROCESS_MEMORY_SETTING_ID) {
+      openProcessMemoryDiagnostics();
+      return;
+    }
+
     if (setting.id === WINDOW_LIFECYCLE_SETTING_ID) {
       await openWindowLifecycleDiagnostics();
     }
@@ -512,6 +531,13 @@ const ActionControl: FC<ActionControlProps> = (props) => {
         >
           <WindowLifecycleSnapshotTable rows={lifecycleSnapshot} />
         </Modal>
+      ) : null}
+
+      {setting.id === PROCESS_MEMORY_SETTING_ID ? (
+        <ProcessMemoryModal
+          onCancel={closeMemoryModal}
+          open={memoryModalOpen}
+        />
       ) : null}
     </>
   );
@@ -691,3 +717,114 @@ function formatLifecycleTiming(
     duration: formatLifecycleDuration(t, row.lastActiveAgoMs),
   });
 }
+
+interface ProcessMemoryModalProps {
+  onCancel: () => void;
+  open: boolean;
+}
+
+interface WebViewHeapStats {
+  jsHeapBytes: number | null;
+  jsHeapLimitBytes: number | null;
+}
+
+/**
+ * 读取 WebView 暴露的 JS 堆指标；非 Chromium 系 WebView（macOS WKWebView）
+ * 没有该 API，返回 null 让面板显示 N/A。
+ */
+function readWebViewHeapStats(): WebViewHeapStats {
+  const memory = (
+    performance as Performance & {
+      memory?: { jsHeapSizeLimit: number; usedJSHeapSize: number };
+    }
+  ).memory;
+
+  if (!memory) {
+    return { jsHeapBytes: null, jsHeapLimitBytes: null };
+  }
+
+  return {
+    jsHeapBytes: memory.usedJSHeapSize,
+    jsHeapLimitBytes: memory.jsHeapSizeLimit,
+  };
+}
+
+/**
+ * 进程内存诊断弹窗：主进程 RSS 由 Rust 命令提供，JS 堆由 WebView 上报。
+ */
+const ProcessMemoryModal: FC<ProcessMemoryModalProps> = (props) => {
+  const { t } = useTranslation("preferences");
+  const { open, onCancel } = props;
+  const [stats, setStats] = useState<MemoryStats | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [heap, setHeap] = useState<WebViewHeapStats | null>(null);
+
+  const refreshStats = async () => {
+    setRefreshing(true);
+    try {
+      const next = await getProcessMemoryStats();
+
+      setStats(next);
+      setHeap(readWebViewHeapStats());
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  useMount(() => {
+    refreshStats();
+  });
+
+  return (
+    <Modal
+      footer={
+        <Button loading={refreshing} onClick={refreshStats}>
+          {t("schema.settings.diagnostics.processMemory.refresh")}
+        </Button>
+      }
+      onCancel={onCancel}
+      open={open}
+      title={t("schema.settings.diagnostics.processMemory.modalTitle")}
+    >
+      <div className="flex flex-col gap-4">
+        <section className="flex flex-col gap-2">
+          <h5 className="mb-0 font-medium text-ant-text text-base">
+            {t("schema.settings.diagnostics.processMemory.process.rss")}
+          </h5>
+          <span className="font-semibold text-2xl text-ant-text tabular-nums">
+            {stats ? formatBytes(stats.rssBytes) : "--"}
+          </span>
+          <span className="text-ant-secondary text-sm">
+            {t("schema.settings.diagnostics.processMemory.process.virtual")}：{" "}
+            {stats ? formatBytes(stats.virtualBytes) : "--"}
+          </span>
+          <p className="mb-0 text-ant-tertiary text-xs leading-relaxed">
+            {t("schema.settings.diagnostics.processMemory.process.hint")}
+          </p>
+        </section>
+
+        <section className="flex flex-col gap-1 border-ant-border-secondary border-t pt-4">
+          <h5 className="mb-0 font-medium text-ant-text text-base">
+            {t("schema.settings.diagnostics.processMemory.webview.jsHeap")}
+          </h5>
+          <span className="text-ant-text text-sm tabular-nums">
+            {heap?.jsHeapBytes !== null && heap?.jsHeapBytes !== void 0
+              ? formatBytes(heap.jsHeapBytes)
+              : "N/A"}
+          </span>
+          <span className="text-ant-secondary text-sm tabular-nums">
+            {t("schema.settings.diagnostics.processMemory.webview.jsHeapLimit")}
+            ：
+            {heap?.jsHeapLimitBytes !== null &&
+            heap?.jsHeapLimitBytes !== void 0
+              ? formatBytes(heap.jsHeapLimitBytes)
+              : "N/A"}
+          </span>
+          <p className="mb-0 text-ant-tertiary text-xs leading-relaxed">
+            {t("schema.settings.diagnostics.processMemory.webview.hint")}
+          </p>
+        </section>
+      </div>
+    </Modal>
+  );
+};
