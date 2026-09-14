@@ -155,6 +155,7 @@ export interface Window {
   selectGroupOnOpen: WindowOpenGroupSelection;
   lightweightMode: boolean;
   idleDestroySeconds: number;
+  idleDestroyMain: boolean;
 }
 
 export type RichTextMode = "off" | "textOnly" | "rich";

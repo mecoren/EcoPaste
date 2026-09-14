@@ -673,6 +673,25 @@ export const preferenceTabs: PreferenceTab[] = [
           },
           {
             control: { type: "switch" },
+            disabledWhen: (settings) => {
+              return !settings.clipboard.window.lightweightMode;
+            },
+            id: "window.idleDestroyMain",
+            keywords: [
+              "system",
+              "performance",
+              "memory",
+              "idle",
+              "main window",
+            ],
+            parentId: "window.lightweightMode",
+            path: ["clipboard", "window", "idleDestroyMain"],
+            value: (settings) => {
+              return settings.clipboard.window.idleDestroyMain;
+            },
+          },
+          {
+            control: { type: "switch" },
             id: "control.trayIcon",
             keywords: ["tray", "menu bar", "system"],
             path: ["general", "trayIcon"],

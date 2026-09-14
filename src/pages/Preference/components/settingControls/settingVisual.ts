@@ -73,6 +73,7 @@ const SETTING_ICON_MAP: Record<string, string> = {
   "updates.beta": "i-lucide:flask-conical",
   "updates.frequency": "i-lucide:calendar-sync",
   "updates.nightly": "i-lucide:moon",
+  "window.idleDestroyMain": "i-lucide:layers-2",
   "window.idleDestroySeconds": "i-lucide:timer-reset",
   "window.lightweightMode": "i-lucide:leaf",
   "window.position": "i-lucide:move",

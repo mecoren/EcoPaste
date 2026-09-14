@@ -76,6 +76,46 @@ pub fn setup_clipboard_panel(app_handle: &AppHandle) -> Result<()> {
     Ok(())
 }
 
+/// 重建后的剪贴板窗口重新 panel 化（`idle_destroy_main` 可选档：主窗口被空闲销毁后，
+/// `build_clipboard_window` 重建出的是普通 NSWindow）。与 [`setup_clipboard_panel`]
+/// 同一套 panel 语义，但**不动 dock 可见性**——dock 显隐由设置 `dock_icon` 控制，
+/// 重建不应把它强制拉回隐藏。
+pub fn setup_clipboard_panel_rebuilt(app_handle: &AppHandle) -> Result<()> {
+    let clipboard_window = get_window(app_handle, CLIPBOARD_WINDOW_LABEL)?;
+
+    let panel = clipboard_window
+        .to_panel::<MainPanel>()
+        .map_err(|e| anyhow::anyhow!("to_panel failed: {e:?}"))?;
+
+    panel.set_corner_radius(16.0);
+    panel.set_level(PanelLevel::Dock.value());
+    panel.set_style_mask(StyleMask::empty().resizable().nonactivating_panel().into());
+    panel.set_collection_behavior(
+        CollectionBehavior::new()
+            .stationary()
+            .move_to_active_space()
+            .full_screen_auxiliary()
+            .into(),
+    );
+
+    let handler = MainPanelEventHandler::new();
+
+    let resign_handle = app_handle.clone();
+    handler.window_did_resign_key(move |_| {
+        if !super::should_auto_hide_clipboard_window() {
+            return;
+        }
+
+        if let Err(err) = super::hide_window(&resign_handle, CLIPBOARD_WINDOW_LABEL) {
+            log::warn!("auto-hide clipboard window on resign-key failed: {err}");
+        }
+    });
+
+    panel.set_event_handler(Some(handler.as_ref()));
+
+    Ok(())
+}
+
 pub fn show_window(app_handle: &AppHandle, label: &str) -> Result<()> {
     if label == CLIPBOARD_WINDOW_LABEL {
         show_clipboard_panel(app_handle)

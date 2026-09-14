@@ -598,6 +598,9 @@ pub struct Window {
     pub lightweight_mode: bool,
     /// 非剪贴板窗口隐藏后释放 WebView 的空闲秒数。
     pub idle_destroy_seconds: u32,
+    /// 剪贴板主窗口也参与空闲销毁（隐藏超过 idle_destroy_seconds 后释放 WebView）。
+    /// 默认关：主窗口唤出速度是核心体验，销毁重建首开约需数百毫秒；仅内存敏感用户开启。
+    pub idle_destroy_main: bool,
 }
 
 impl Default for Window {
@@ -610,6 +613,7 @@ impl Default for Window {
             select_group_on_open: WINDOW_OPEN_SELECTION_PRESERVE.to_owned(),
             lightweight_mode: true,
             idle_destroy_seconds: 60,
+            idle_destroy_main: false,
         }
     }
 }

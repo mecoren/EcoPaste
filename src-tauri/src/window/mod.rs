@@ -262,6 +262,56 @@ pub fn intercept_close_request(window: &Window) -> bool {
     true
 }
 
+/// 按需重建剪贴板主窗口。主窗口默认 `Permanent` 保活（由 `tauri.conf.json` 预创建），
+/// 但 `idle_destroy_main` 可选档开启后会被空闲销毁，`show_window` 经 descriptor 的
+/// build fn 走到这里——必须完整复刻 `tauri.conf.json` 的窗口声明，否则重建后行为漂移
+/// （透明、置顶、不可聚焦、隐藏任务栏等都是主窗口语义的承重属性）。
+///
+/// 建窗后保持 `visible: false`：由 [`show_window`] 统一走恢复几何 + 平台 show 流程。
+/// macOS 的 NSPanel 转换（to_panel + 事件绑定）由 `show_window` 内的平台分支不涉及，
+/// 重建后的 panel 化在 [`macos::setup_clipboard_panel_rebuilt`] 里补齐。
+pub fn build_clipboard_window(app_handle: &AppHandle) -> Result<()> {
+    if app_handle
+        .get_webview_window(CLIPBOARD_WINDOW_LABEL)
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    let builder = WebviewWindowBuilder::new(
+        app_handle,
+        CLIPBOARD_WINDOW_LABEL,
+        WebviewUrl::App("index.html/#/".into()),
+    )
+    .title("EcoPaste")
+    .inner_size(360.0, 600.0)
+    .min_inner_size(360.0, 600.0)
+    .maximizable(false)
+    .always_on_top(true)
+    .decorations(false)
+    .transparent(true)
+    .focusable(false)
+    .skip_taskbar(true)
+    .accept_first_mouse(true)
+    .disable_drag_drop_handler()
+    .visible(false);
+
+    builder
+        .build()
+        .map_err(|err| anyhow::anyhow!("build clipboard window: {err}"))?;
+
+    #[cfg(target_os = "macos")]
+    {
+        // 预创建路径在 setup 里做过一次 to_panel；重建的窗口是普通 NSWindow，
+        // 这里还原同样的 panel 语义（圆角、层级、样式掩码、resign-key 自动隐藏）。
+        if let Err(err) = macos::setup_clipboard_panel_rebuilt(app_handle) {
+            log::error!("setup rebuilt clipboard NSPanel failed: {err:?}");
+        }
+    }
+
+    Ok(())
+}
+
 /// 按需重建 preference 窗口。preference 不再由 Tauri 配置预创建（改为 `DestroyWhenIdle`），
 /// 故所有选项必须在此用 builder 完整复刻原 `tauri.conf.json` 声明，否则重建后行为漂移。
 ///

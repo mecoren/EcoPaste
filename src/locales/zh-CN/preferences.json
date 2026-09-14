@@ -631,6 +631,10 @@
         }
       },
       "window": {
+        "idleDestroyMain": {
+          "description": "剪贴板主窗口也参与空闲释放：隐藏超过上方时长后释放 WebView，再次唤出时自动重建（首开约需数百毫秒）。默认关闭以保持唤出即时；仅内存敏感时开启。",
+          "title": "主窗口空闲释放"
+        },
         "idleDestroySeconds": {
           "description": "偏好设置、预览和右键菜单等非剪贴板窗口隐藏超过此时间后释放 WebView，下次使用时自动重建。",
           "title": "非剪贴板窗口空闲释放"

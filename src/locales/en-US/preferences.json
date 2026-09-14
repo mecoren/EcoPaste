@@ -631,6 +631,10 @@
         }
       },
       "window": {
+        "idleDestroyMain": {
+          "description": "Also release the main clipboard window WebView after it stays hidden for the duration above; it rebuilds on the next summon (first open takes a few hundred milliseconds). Off by default to keep summoning instant; enable only if you are memory-sensitive.",
+          "title": "Main Window Idle Release"
+        },
         "idleDestroySeconds": {
           "description": "Release secondary WebViews such as preferences, preview, and context menus after they have been hidden for this long; they rebuild automatically next time.",
           "title": "Secondary Window Idle Release"

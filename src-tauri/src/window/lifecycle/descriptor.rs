@@ -7,8 +7,8 @@
 use tauri::AppHandle;
 
 use super::super::{
-    build_onboarding_window, build_preference_window, build_update_window, preview,
-    CLIPBOARD_PREVIEW_WINDOW_LABEL, CLIPBOARD_WINDOW_LABEL, ONBOARDING_WINDOW_LABEL,
+    build_clipboard_window, build_onboarding_window, build_preference_window, build_update_window,
+    preview, CLIPBOARD_PREVIEW_WINDOW_LABEL, CLIPBOARD_WINDOW_LABEL, ONBOARDING_WINDOW_LABEL,
     PREFERENCE_WINDOW_LABEL, UPDATE_WINDOW_LABEL,
 };
 use crate::core::Result;
@@ -48,7 +48,8 @@ pub struct WindowDescriptor {
     /// 保留 / 销毁策略。
     pub retain_policy: RetainPolicy,
     /// 按需重建函数。`DestroyWhenIdle` 窗口被销毁后由各自打开入口用它重新建窗；
-    /// `Permanent` 窗口无需重建，为 `None`。
+    /// `Permanent` 窗口一般无需重建——唯一例外是剪贴板主窗口（`idle_destroy_main`
+    /// 可选档开启时会被空闲销毁），故也带 build。
     pub build: Option<fn(&AppHandle) -> Result<()>>,
 }
 
@@ -57,8 +58,10 @@ static DESCRIPTORS: &[WindowDescriptor] = &[
     WindowDescriptor {
         label: CLIPBOARD_WINDOW_LABEL,
         emits_lifecycle: true,
+        // 默认 Permanent 保活；`idle_destroy_main` 开启后生命周期管理器也对其空闲销毁，
+        // 销毁后经 `build` 重建（见 lifecycle/mod.rs 的 clipboard 分支）。
         retain_policy: RetainPolicy::Permanent,
-        build: None,
+        build: Some(build_clipboard_window),
     },
     WindowDescriptor {
         label: PREFERENCE_WINDOW_LABEL,

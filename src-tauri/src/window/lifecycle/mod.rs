@@ -244,7 +244,15 @@ impl WindowLifecycleManager {
             schedule_idle_destroy(app, label, generation, idle_destroy_secs(app));
         }
 
-        if matches!(phase, LifecyclePhase::HiddenWarm)
+        // 剪贴板主窗口：`idle_destroy_main` 开启时同样参与空闲销毁（否则只走 dormant 冻结）。
+        // 二者互斥——同一计时周期只挂销毁计时器，dormant 冻结对「即将销毁」的窗口没有意义。
+        let clipboard_idle_destroy = matches!(phase, LifecyclePhase::HiddenWarm)
+            && previous != LifecyclePhase::HiddenWarm
+            && label == super::CLIPBOARD_WINDOW_LABEL
+            && idle_destroy_main_enabled(app);
+        if clipboard_idle_destroy {
+            schedule_idle_destroy(app, label, generation, idle_destroy_secs(app));
+        } else if matches!(phase, LifecyclePhase::HiddenWarm)
             && previous != LifecyclePhase::HiddenWarm
             && label == super::CLIPBOARD_WINDOW_LABEL
             && lightweight_mode_enabled(app)
@@ -536,10 +544,18 @@ fn schedule_idle_destroy(app: &AppHandle, label: &str, generation: u64, timeout_
     });
 }
 
-/// 计时器到点的销毁判定（主线程）：代次未变且仍处于 HiddenWarm 才进入 DestroyPending，
-/// 否则说明窗口已被重新显示或已销毁，放弃本次销毁。
+/// 计时器到点的销毁判定（主线程）：代次未变且仍处于 HiddenWarm / Dormant（剪贴板
+/// 主窗口 `idle_destroy_main` 开启时先经 dormant 冻结，两阶段都允许销毁）才进入
+/// DestroyPending，否则说明窗口已被重新显示或已销毁，放弃本次销毁。
 fn try_destroy_idle(app: &AppHandle, label: &str, generation: u64) {
-    if !lightweight_mode_enabled(app) {
+    // DestroyWhenIdle 窗口看轻量模式；剪贴板主窗口看 `idle_destroy_main` 可选档——
+    // 计时器挂起期间用户关掉开关时，到点不得再销毁。
+    let destroy_allowed = if label == super::CLIPBOARD_WINDOW_LABEL {
+        idle_destroy_main_enabled(app)
+    } else {
+        lightweight_mode_enabled(app)
+    };
+    if !destroy_allowed {
         return;
     }
 
@@ -549,7 +565,11 @@ fn try_destroy_idle(app: &AppHandle, label: &str, generation: u64) {
 
     let check = manager.with_states(|states| match states.get_mut(label) {
         Some(state) => {
-            if state.generation != generation || state.phase != LifecyclePhase::HiddenWarm {
+            let idle_phase = matches!(
+                state.phase,
+                LifecyclePhase::HiddenWarm | LifecyclePhase::Dormant
+            );
+            if state.generation != generation || !idle_phase {
                 return DestroyCheck::Stale;
             }
 
@@ -683,6 +703,13 @@ fn lightweight_mode_enabled(app: &AppHandle) -> bool {
         .unwrap_or(true)
 }
 
+/// 剪贴板主窗口是否参与空闲销毁（可选档，默认关）。
+fn idle_destroy_main_enabled(app: &AppHandle) -> bool {
+    app.try_state::<SettingsStore>()
+        .map(|settings| settings.snapshot().clipboard.window.idle_destroy_main)
+        .unwrap_or(false)
+}
+
 /// 从设置读取非剪贴板窗口空闲销毁秒数，并做边界收敛。
 fn idle_destroy_secs(app: &AppHandle) -> u64 {
     app.try_state::<SettingsStore>()
@@ -759,6 +786,29 @@ mod tests {
         state.transition_phase(LifecyclePhase::Visible, now + Duration::from_secs(3));
 
         assert_eq!(state.generation, 2);
+    }
+
+    /// 剪贴板主窗口 `idle_destroy_main` 开启时，dormant 冻结不阻断空闲销毁：
+    /// HiddenWarm → Dormant 的转换不 bump generation（仍从 HiddenWarm 代次延续），
+    /// 销毁计时器到点时 Dormant 与 HiddenWarm 同样放行。此测试锁定
+    /// 「dormant 前后 generation 不变」这一销毁判定的前提。
+    #[test]
+    fn dormant_transition_keeps_generation_for_idle_destroy() {
+        let mut state = RuntimeState::new();
+        let now = Instant::now();
+
+        state.transition_phase(LifecyclePhase::Visible, now);
+        state.transition_phase(LifecyclePhase::HiddenWarm, now + Duration::from_secs(1));
+        let hidden_generation = state.generation;
+
+        state.transition_phase(LifecyclePhase::Dormant, now + Duration::from_secs(6));
+
+        assert_eq!(state.generation, hidden_generation);
+        assert_eq!(state.phase, LifecyclePhase::Dormant);
+        assert!(
+            state.hidden_at.is_some(),
+            "dormant 保留 hidden_at：销毁判定仍可读隐藏时长"
+        );
     }
 
     #[test]
