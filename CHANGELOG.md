@@ -1,5 +1,37 @@
 # Changelog
 
+## [1.2.0](https://github.com/mecoren/EcoPaste/compare/v1.1.0...v1.2.0) (2026-09-14)
+
+### ✨ Features
+
+* add batch clipboard item operations (favorite, pin, note, copy, delete) ([3ed4b89](https://github.com/mecoren/EcoPaste/commit/3ed4b89))
+* add database compaction and clear-on-exit history ([7c59855](https://github.com/mecoren/EcoPaste/commit/7c59855))
+* add image preview lightbox with origin image ([ff3afae](https://github.com/mecoren/EcoPaste/commit/ff3afae))
+* add list loading feedback, back-to-top, density presets and parallel quick actions ([361224a](https://github.com/mecoren/EcoPaste/commit/361224a))
+* add memory observability and storage watermark ([f2ab1ab](https://github.com/mecoren/EcoPaste/commit/f2ab1ab))
+* add multi-select batch delete and shift-number plain paste ([b9e4842](https://github.com/mecoren/EcoPaste/commit/b9e4842))
+* add optional main window idle destroy ([67294c7](https://github.com/mecoren/EcoPaste/commit/67294c7))
+* add rich text preview with sanitized sandbox iframe ([e70d1c7](https://github.com/mecoren/EcoPaste/commit/e70d1c7))
+* filter clipboard items by source app ([daead85](https://github.com/mecoren/EcoPaste/commit/daead85))
+* keep clipboard search ready for type-to-search like Ditto ([3718540](https://github.com/mecoren/EcoPaste/commit/3718540))
+* support editing text clipboard item content ([a341ced](https://github.com/mecoren/EcoPaste/commit/a341ced))
+
+### 🐛 Bug Fixes
+
+* restore search focus on Backspace after arrow navigation ([eed9572](https://github.com/mecoren/EcoPaste/commit/eed9572))
+
+### ⚡️ Performance
+
+* batch backup merge imports ([7e2962c](https://github.com/mecoren/EcoPaste/commit/7e2962c))
+* defer source app icon extraction off the watcher thread ([edfaa03](https://github.com/mecoren/EcoPaste/commit/edfaa03))
+* dedupe plain-text search_text storage ([c784e87](https://github.com/mecoren/EcoPaste/commit/c784e87))
+* incremental clipboard list updates and modifier-key link styling via CSS ([739b1f3](https://github.com/mecoren/EcoPaste/commit/739b1f3))
+* mimalloc and preview downsampling ([65706ed](https://github.com/mecoren/EcoPaste/commit/65706ed))
+* skip FTS rebuild on metadata-only updates ([0795cc8](https://github.com/mecoren/EcoPaste/commit/0795cc8))
+* speed up clipboard hot path with sort indices and batched icon prefetch ([8ec2eeb](https://github.com/mecoren/EcoPaste/commit/8ec2eeb))
+* take clipboard item by value in persist path ([a96928d](https://github.com/mecoren/EcoPaste/commit/a96928d))
+* watcher hot path and count governance ([ab91fee](https://github.com/mecoren/EcoPaste/commit/ab91fee))
+
 ## [1.1.0](https://github.com/EcoPasteHub/EcoPaste/compare/v1.0.0...v1.1.0) (2026-07-22)
 
 ### ✨ Features

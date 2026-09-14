@@ -36,7 +36,7 @@ jobs:
         id: release
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           INPUT_TAG_NAME: ${{ inputs.tag_name }}
         run: |
           set -euo pipefail
@@ -260,7 +260,7 @@ jobs:
         uses: tauri-apps/tauri-action@v1
         env:
           CI: false
-          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
           PLATFORM: ${{ matrix.os }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
