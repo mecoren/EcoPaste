@@ -481,6 +481,10 @@ pub struct Preview {
     pub hover_enabled: bool,
     pub hover_delay_ms: PreviewHoverDelayMs,
     pub space_enabled: bool,
+    /// 预览窗口富文本（HTML / RTF）的渲染档位。
+    pub rich_text_mode: RichTextMode,
+    /// 尝试按 Markdown 渲染纯文本条目（默认关，纯文本预览多一个 MD 切换 tab）。
+    pub render_markdown: bool,
 }
 
 impl Default for Preview {
@@ -489,6 +493,8 @@ impl Default for Preview {
             hover_enabled: false,
             hover_delay_ms: PreviewHoverDelayMs::Ms500,
             space_enabled: true,
+            rich_text_mode: RichTextMode::Rich,
+            render_markdown: false,
         }
     }
 }
@@ -500,6 +506,17 @@ pub enum PreviewHoverDelayMs {
     #[default]
     Ms500,
     Ms1000,
+}
+
+/// 富文本预览渲染档位：`Rich` 渲染富文本、`TextOnly` / `Off` 强制纯文本行
+///（`Off` 保留为显式关闭语义，与 `TextOnly` 走同一条纯文本管道）。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RichTextMode {
+    Off,
+    TextOnly,
+    #[default]
+    Rich,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

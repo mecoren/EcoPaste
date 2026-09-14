@@ -132,6 +132,8 @@ export interface ClipboardPreviewPayload {
   subKind: ClipboardSubKind | null;
   updatedAt: string;
   text: string | null;
+  /** 富文本 HTML（仅 Rich 档位且未脱敏）；预览页 sanitize 后走沙箱 iframe 渲染。 */
+  html: string | null;
   /** 预览面板渲染图（960px 预览档路径）；仅灯箱放大用 `imageOriginPath` 原图。 */
   imagePath: string | null;
   imageOriginPath: string | null;

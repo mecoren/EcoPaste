@@ -528,6 +528,19 @@
           "description": "Show a full-content preview when hovering over a record.",
           "title": "Hover Preview"
         },
+        "renderMarkdown": {
+          "description": "Adds an \"MD / Plain\" toggle to plain-text previews that renders Markdown syntax.",
+          "title": "Render Plain Text as Markdown"
+        },
+        "richTextMode": {
+          "description": "Controls how HTML / RTF rich text renders in the preview; turning it off always shows plain text.",
+          "options": {
+            "off": "Off",
+            "rich": "Rich text",
+            "textOnly": "Text only"
+          },
+          "title": "Rich Text Preview"
+        },
         "space": {
           "description": "Hold Space to preview the currently selected record.",
           "title": "Space Preview"

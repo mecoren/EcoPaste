@@ -531,6 +531,31 @@ export const preferenceTabs: PreferenceTab[] = [
               return settings.clipboard.preview.spaceEnabled;
             },
           },
+          {
+            control: {
+              options: [
+                { value: "rich" },
+                { value: "textOnly" },
+                { value: "off" },
+              ],
+              type: "segmented",
+            },
+            id: "preview.richTextMode",
+            keywords: ["preview", "rich", "text", "html", "rtf"],
+            path: ["clipboard", "preview", "richTextMode"],
+            value: (settings) => {
+              return settings.clipboard.preview.richTextMode;
+            },
+          },
+          {
+            control: { type: "switch" },
+            id: "preview.renderMarkdown",
+            keywords: ["preview", "markdown", "md"],
+            path: ["clipboard", "preview", "renderMarkdown"],
+            value: (settings) => {
+              return settings.clipboard.preview.renderMarkdown;
+            },
+          },
         ],
       },
       {

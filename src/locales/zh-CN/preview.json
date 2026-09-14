@@ -20,6 +20,14 @@
     "filesLoaded": "{{count}} 项已加载",
     "unknownSize": "未知尺寸"
   },
+  "rich": {
+    "frameTitle": "富文本预览",
+    "tooLarge": "内容过大，按纯文本显示"
+  },
+  "text": {
+    "markdownView": "MD",
+    "plainView": "原文"
+  },
   "title": {
     "files": "{{count}} 个项目",
     "image": "图片预览",

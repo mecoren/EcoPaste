@@ -5,6 +5,7 @@ import type { FC } from "react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Virtuoso } from "react-virtuoso";
+import { useSnapshot } from "valtio";
 import type {
   ClipboardPreviewFileEntry,
   ClipboardPreviewPayload,
@@ -13,8 +14,11 @@ import AssetImage from "@/components/AssetImage";
 import VirtuosoScroller, {
   type VirtuosoScrollerChildrenProps,
 } from "@/components/VirtuosoScroller";
+import { settingsState } from "@/stores/settings";
 import { cn } from "@/utils/cn";
 import { PREVIEW_TEXT_SOFT_WRAP_CHARS } from "../constants";
+import MarkdownPreview from "./MarkdownPreview";
+import RichTextViewer from "./RichTextViewer";
 
 export interface PreviewContentProps {
   payload: ClipboardPreviewPayload | null;
@@ -95,15 +99,20 @@ export const PreviewContent: FC<PreviewContentProps> = (props) => {
 };
 
 /**
- * 文本预览：所有文本族内容都按纯文本虚拟行展示，避免长 HTML / RTF 构造大 DOM。
+ * 文本预览分流（P0-2）：富文本条目（payload.html）走沙箱 iframe 渲染；
+ * 纯文本条目在开启 MD 开关时可切换 Markdown / 原文视图；默认纯文本虚拟行。
  */
 const TextViewer: FC<PayloadViewerProps> = (props) => {
   const { payload } = props;
   const { t } = useTranslation("preview");
+  const { clipboard } = useSnapshot(settingsState);
+  const renderMarkdown = clipboard.preview.renderMarkdown;
+  const [mdView, setMdView] = useState(false);
   const text = payload.text ?? "";
-  const rows = useMemo(() => {
-    return buildTextPreviewRows(text);
-  }, [text]);
+
+  if (payload.html) {
+    return <RichTextViewer fallbackText={text} html={payload.html} />;
+  }
 
   if (text.length === 0) {
     return (
@@ -115,6 +124,57 @@ const TextViewer: FC<PayloadViewerProps> = (props) => {
       </div>
     );
   }
+
+  if (renderMarkdown) {
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <div className="flex shrink-0 justify-end gap-1 border-ant-border border-b px-4 py-1">
+          <button
+            className={cn(
+              "rounded-1 px-1.5 text-ant-secondary text-xs transition-colors hover:text-ant-text",
+              { "font-medium text-ant-primary": mdView },
+            )}
+            onClick={() => {
+              setMdView(true);
+            }}
+            type="button"
+          >
+            {t("text.markdownView")}
+          </button>
+          <button
+            className={cn(
+              "rounded-1 px-1.5 text-ant-secondary text-xs transition-colors hover:text-ant-text",
+              { "font-medium text-ant-primary": !mdView },
+            )}
+            onClick={() => {
+              setMdView(false);
+            }}
+            type="button"
+          >
+            {t("text.plainView")}
+          </button>
+        </div>
+
+        {mdView ? (
+          <MarkdownPreview text={text} />
+        ) : (
+          <PlainTextViewer text={text} />
+        )}
+      </div>
+    );
+  }
+
+  return <PlainTextViewer text={text} />;
+};
+
+/**
+ * 纯文本虚拟行渲染：所有文本族内容按纯文本虚拟行展示，避免长内容构造大 DOM。
+ */
+const PlainTextViewer: FC<{ text: string }> = (props) => {
+  const { text } = props;
+  const rows = useMemo(() => {
+    return buildTextPreviewRows(text);
+  }, [text]);
 
   return <VirtuosoScroller>{renderTextVirtuoso}</VirtuosoScroller>;
 

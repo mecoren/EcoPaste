@@ -24,7 +24,7 @@ use crate::db::models::{
     ClipboardItemQuery, ClipboardKind, ClipboardSubKind, FileEntry, Platform,
 };
 use crate::db::DatabaseState;
-use crate::settings::SettingsStore;
+use crate::settings::{RichTextMode, SettingsStore};
 use crate::window::{self, CLIPBOARD_WINDOW_LABEL};
 
 /// 与前端 `src/constants/events.ts` 的 `TAURI_EVENT.CLIPBOARD_UPDATED` 一一对应。
@@ -274,6 +274,9 @@ pub struct ClipboardPreviewPayload {
     pub updated_at: DateTime<Utc>,
     /// 预览窗口展示用纯文本。HTML / RTF 条目返回 `search_text`，不返回富文本源。
     pub text: Option<String>,
+    /// 富文本 HTML 表示：仅 Rich 档位、未脱敏的 html / rtf 条目携带；前端
+    /// DOMPurify sanitize 后注入沙箱 iframe 渲染，纯文本行渲染不读它。
+    pub html: Option<String>,
     /// 预览面板渲染图：960px 预览档（懒生成），避免面板解码整张原图。
     pub image_path: Option<String>,
     /// 原图绝对路径：仅灯箱放大使用（P3-1），面板渲染不读。
@@ -338,18 +341,16 @@ pub async fn get_clipboard_preview_payload(
         return Ok(None);
     };
 
-    let redact_sensitive = app
-        .state::<SettingsStore>()
-        .snapshot()
-        .clipboard
-        .sensitive
-        .redact_secrets;
+    let settings = app.state::<SettingsStore>().snapshot();
+    let redact_sensitive = settings.clipboard.sensitive.redact_secrets;
+    let rich_text_mode = settings.clipboard.preview.rich_text_mode;
     let payload = build_clipboard_preview_payload(
         &pool,
         &image_store,
         &file_icon_store,
         item,
         redact_sensitive,
+        rich_text_mode,
     )
     .await?;
     Ok(Some(payload))
@@ -772,6 +773,28 @@ fn preview_text(item: &ClipboardItem, redact_sensitive: bool) -> String {
     source.to_owned()
 }
 
+/// 富文本档位下附带 HTML 表示：html 条目直接带源；rtf 条目经平台转换
+/// （macOS 走 NSAttributedString 系统 API；Windows 无轻量转换路径，返回
+/// `None` 降级纯文本行——与 Maccy 一致）。脱敏条目不带，避免明文泄露。
+fn preview_html(
+    item: &ClipboardItem,
+    redact_sensitive: bool,
+    mode: RichTextMode,
+) -> Result<Option<String>> {
+    if mode != RichTextMode::Rich {
+        return Ok(None);
+    }
+    if redact_sensitive && item.is_sensitive {
+        return Ok(None);
+    }
+
+    match item.sub_kind {
+        Some(ClipboardSubKind::Html) => Ok(Some(item.content.clone())),
+        Some(ClipboardSubKind::Rtf) => crate::clipboard::rtf_to_html(&item.content),
+        _ => Ok(None),
+    }
+}
+
 /// 把 `created_at`（UTC）按本地时区做三档展示格式化：
 /// 今天 → `HH:mm:ss`，今年内 → `MM-DD HH:mm`，跨年 → `YYYY-MM-DD HH:mm`。
 /// `now` 由调用方在批处理外取一次，避免列表内逐条 syscall。
@@ -1071,8 +1094,10 @@ async fn build_clipboard_preview_payload(
     file_icon_store: &FileIconStore,
     item: ClipboardItem,
     redact_sensitive: bool,
+    rich_text_mode: RichTextMode,
 ) -> Result<ClipboardPreviewPayload> {
     let mut text = None;
+    let mut html = None;
     let mut image_path = None;
     let mut image_origin_path = None;
     let mut image_exists = false;
@@ -1082,6 +1107,7 @@ async fn build_clipboard_preview_payload(
     match item.kind {
         ClipboardKind::Text => {
             text = Some(preview_text(&item, redact_sensitive));
+            html = preview_html(&item, redact_sensitive, rich_text_mode)?;
         }
         ClipboardKind::Image => {
             validate_image_file_name(&item.content)?;
@@ -1121,6 +1147,8 @@ async fn build_clipboard_preview_payload(
         sub_kind: preview_sub_kind,
         updated_at: item.updated_at,
         text,
+        // 富文本 HTML（仅 Rich 档位且未脱敏）；前端 DOMPurify + 沙箱 iframe 渲染。
+        html,
         image_path,
         image_origin_path,
         image_width: item.width,
@@ -2119,6 +2147,68 @@ mod tests {
         item.content = "plain text".to_owned();
 
         assert_eq!(preview_text(&item, false), "plain text");
+    }
+
+    /// 富文本 HTML 附带逻辑：Rich+html 带源、档位关闭不带、脱敏条目不带、
+    /// 纯文本条目不带、rtf 在 Windows 降级为 None。
+    #[test]
+    fn preview_html_attaches_only_for_rich_mode_html_items() {
+        let item = text_item(Some(ClipboardSubKind::Html), false);
+
+        assert_eq!(
+            preview_html(&item, false, RichTextMode::Rich).unwrap(),
+            Some("<b>secret</b>".to_owned())
+        );
+        assert_eq!(
+            preview_html(&item, false, RichTextMode::TextOnly).unwrap(),
+            None,
+            "TextOnly 档位不附带 HTML"
+        );
+        assert_eq!(
+            preview_html(&item, false, RichTextMode::Off).unwrap(),
+            None,
+            "Off 档位不附带 HTML"
+        );
+    }
+
+    #[test]
+    fn preview_html_skips_sensitive_when_redacted() {
+        let item = text_item(Some(ClipboardSubKind::Html), true);
+
+        assert_eq!(
+            preview_html(&item, true, RichTextMode::Rich).unwrap(),
+            None,
+            "脱敏条目不附带富文本源"
+        );
+        assert_eq!(
+            preview_html(&item, false, RichTextMode::Rich).unwrap(),
+            Some("<b>secret</b>".to_owned()),
+            "未开脱敏时照常附带"
+        );
+    }
+
+    #[test]
+    fn preview_html_skips_plain_text_items() {
+        let item = text_item(None, false);
+
+        assert_eq!(
+            preview_html(&item, false, RichTextMode::Rich).unwrap(),
+            None,
+            "纯文本条目无 HTML 表示"
+        );
+    }
+
+    #[test]
+    fn preview_html_degrades_rtf_on_windows() {
+        let mut item = text_item(Some(ClipboardSubKind::Rtf), false);
+        item.content = "{\\rtf1 hello}".to_owned();
+
+        // Windows 无轻量 RTF→HTML 路径：None 降级纯文本行（macOS 上转换结果
+        // 依赖系统，不在此断言具体内容，只断言不报错）。
+        let converted = preview_html(&item, false, RichTextMode::Rich).unwrap();
+        if cfg!(target_os = "windows") {
+            assert_eq!(converted, None);
+        }
     }
 
     #[test]

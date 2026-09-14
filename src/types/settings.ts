@@ -157,10 +157,14 @@ export interface Window {
   idleDestroySeconds: number;
 }
 
+export type RichTextMode = "off" | "textOnly" | "rich";
+
 export interface Preview {
   hoverEnabled: boolean;
   hoverDelayMs: PreviewHoverDelayMs;
   spaceEnabled: boolean;
+  richTextMode: RichTextMode;
+  renderMarkdown: boolean;
 }
 
 export interface Feedback {

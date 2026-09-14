@@ -20,6 +20,14 @@
     "filesLoaded": "{{count}} items loaded",
     "unknownSize": "Unknown size"
   },
+  "rich": {
+    "frameTitle": "Rich text preview",
+    "tooLarge": "Content too large, showing as plain text"
+  },
+  "text": {
+    "markdownView": "MD",
+    "plainView": "Plain"
+  },
   "title": {
     "files": "{{count}} items",
     "image": "Image preview",

@@ -528,6 +528,19 @@
           "description": "鼠标悬停在记录上时显示完整内容预览。",
           "title": "悬停预览"
         },
+        "renderMarkdown": {
+          "description": "纯文本预览增加「MD / 原文」切换，按 Markdown 语法渲染。",
+          "title": "按 Markdown 渲染纯文本"
+        },
+        "richTextMode": {
+          "description": "控制预览窗口 HTML / RTF 富文本的渲染方式；关闭则一律按纯文本显示。",
+          "options": {
+            "off": "关闭",
+            "rich": "富文本",
+            "textOnly": "仅文本"
+          },
+          "title": "富文本预览"
+        },
         "space": {
           "description": "按住空格键时预览当前选中的记录。",
           "title": "空格键预览"
