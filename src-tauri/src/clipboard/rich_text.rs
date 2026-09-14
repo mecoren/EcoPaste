@@ -20,45 +20,33 @@ pub fn rtf_to_html(rtf: &str) -> Result<Option<String>> {
 
 #[cfg(target_os = "macos")]
 fn platform_rtf_to_html(rtf: &str) -> Result<Option<String>> {
+    use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
-    use objc2_app_kit::NSAttributedString;
-    use objc2_app_kit::{
-        NSAttributedStringAppKitDocumentFormats, NSAttributedStringDocumentFormats,
-        NSDocumentTypeDocumentOption, NSHTMLTextDocumentType, NSRTFTextDocumentType,
-    };
-    use objc2_foundation::{NSData, NSDictionary, NSString};
+    use objc2::AnyThread;
+    use objc2_app_kit::NSAttributedStringAppKitDocumentFormats;
+    use objc2_app_kit::NSAttributedStringDocumentFormats;
+    use objc2_app_kit::{NSDocumentTypeDocumentOption, NSHTMLTextDocumentType};
+    use objc2_foundation::{NSAttributedString, NSData, NSDictionary, NSString};
 
     // NSAttributedString 文档 API 要求主线程调用（预览命令本身在主线程）。
     let data = NSData::with_bytes(rtf.as_bytes());
-    let reading = NSDictionary::from_retained_objects(
-        &[&*NSDocumentTypeDocumentOption as &NSString],
-        &[objc2::rc::Retained::cast_unchecked(
-            (*NSRTFTextDocumentType).clone(),
-        )],
-    );
 
-    let Ok(attributed) = (unsafe {
-        NSAttributedString::initWithData_options_documentAttributes_error(
-            NSAttributedString::alloc(),
-            &data,
-            &reading,
-            None,
-        )
+    let Some(attributed) = (unsafe {
+        NSAttributedString::initWithRTF_documentAttributes(NSAttributedString::alloc(), &data, None)
     }) else {
         return Ok(None);
     };
 
-    let writing = NSDictionary::from_retained_objects(
-        &[&*NSDocumentTypeDocumentOption as &NSString],
-        &[objc2::rc::Retained::cast_unchecked(
-            (*NSHTMLTextDocumentType).clone(),
-        )],
-    );
-    let length = attributed.length();
+    // 文档键与文档类型常量都是 NSString 的 type alias；extern static 读取需 unsafe。
+    let keys: [&NSString; 1] = [unsafe { NSDocumentTypeDocumentOption }];
+    let values = [Retained::<AnyObject>::from(Retained::<NSString>::from(
+        unsafe { NSHTMLTextDocumentType },
+    ))];
+    let writing = NSDictionary::from_retained_objects(&keys, &values);
 
     let html_data = (unsafe {
         attributed.dataFromRange_documentAttributes_error(
-            objc2_foundation::NSRange::new(0, length),
+            objc2_foundation::NSRange::new(0, attributed.length()),
             &writing,
         )
     })
@@ -68,7 +56,7 @@ fn platform_rtf_to_html(rtf: &str) -> Result<Option<String>> {
         return Ok(None);
     };
 
-    let html = String::from_utf8_lossy(html_data.bytes()).into_owned();
+    let html = String::from_utf8_lossy(&html_data.to_vec()).into_owned();
 
     Ok(if html.trim().is_empty() {
         None
