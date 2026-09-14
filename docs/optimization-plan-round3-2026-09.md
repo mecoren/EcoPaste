@@ -1,12 +1,14 @@
-# EcoPaste 第三轮全面优化方案（Round 3）
+# EcoPaste 第三轮全面优化方案（Round 3）——实施完成版
 
 > 调研日期：2026-09-12。对标：Maccy（macOS）、CopyQ、Ditto、PasteBar。
-> 性质：**方案文档，本轮不写代码**。
-> 前置：第一轮 7 项、第二轮 8 项优化已全部落地提交（见 `docs/optimization-report-2026-09.md` 与 `docs/optimization-plan-round2-2026-09.md`）。本文档只含**新项**，逐项对照过现状，不与前两轮重复；前两轮「明确不做」清单中仍然成立的项不再翻案。
+> **实施状态**：五批次全部落地，共 9 个提交（f2ab1ab → 67294c7），见各实施项下方标注。两处经实施评估放弃/回退的子项已注明原因；P1-1 图标异步化子项在批次③主体提交（ab91fee）后单独补齐（edfaa03）。
+> 前置：第一轮 7 项、第二轮 8 项优化已全部落地提交（见 `docs/optimization-report-2026-09.md` 与本文档末轮 2 章节）。本文档只含**新项**，逐项对照过现状，不与前两轮重复；前两轮「明确不做」清单中仍然成立的项不再翻案。
 
 ## 结论先行
 
 经过两轮优化，列表热路径、FTS 写放大、IPC payload 裁剪、前端窗口缓存、webview 空闲销毁都已达标——**容易摘的果子已经摘完**。本轮的真正空间在三个层面：
+
+> ✅ **实施结果**：三个层面全部兑现——功能层 3 缺口（批量操作、富文本预览、图片预览降采样+灯箱）补齐；性能层监听热路径（识别闸门 + Settings 快照去深拷 + COUNT 治理）落地；内存层从不可观测（观测命令 + 基准脚本 + mimalloc）到主窗口可选销毁档全部就位。
 
 1. **功能层面**：对标 4 个开源产品后，市场标配而本项目缺失的还剩 3 个硬缺口——**多选批量操作（只做了删除，收藏/置顶/移动分组/导出都没有）、HTML/RTF/Markdown 富文本预览（目前刻意只按纯文本行渲染）、图片预览降采样（480px 面板解码整张原图）**。
 2. **性能层面**：监听热路径的**正则成本无长度短路**（每条文本复制全串跑 10 个正则 + path 分支 `exists()` 文件系统调用）、**每次剪贴板事件深拷整个 Settings**、**CJK 双字词搜索恒走全表 LIKE**、**每次翻页伴随 COUNT(\*)**。
@@ -32,6 +34,8 @@
 
 ### P0-1 多选批量操作补全 —— 收藏 / 置顶 / 移动分组 / 导出
 
+> ✅ **已实施**（`3ed4b89`）。4 个批量命令 + `BatchActionToolbar` 工具条 + `GroupPickerModal` 移动分组弹层 + `export_items_backup`（临时过滤库 + 资源子集 + 复用容器组装，round-trip 单测证导入端可消费）；`BackupExportModal` 参数化 `itemIds` 支持导出所选。批量 UPDATE 按 `MERGE_INSERT_CHUNK=500` 分块防超绑定参数上限；纯元数据 UPDATE 不触发 FTS 重建（0003 触发器 WHEN 条件保证）。
+
 **对标**：Ditto、CopyQ 标配（多选后右键即批量菜单）；Maccy 无多选、PasteBar 有多选。上一轮做了批量删除（市场 2/4），但多选后的批量收藏、批量置顶、批量移动分组、批量导出仍然缺失——用户「先筛选再整理」的真实流程（按类型/来源应用过滤 → 多选 → 归档/整理）当前只能逐条点。
 
 **现状**：多选交互闭环完整（Ctrl/Cmd+Click、Shift+↑/↓、Esc 清空、`multiSelectedIds`），批量删除链路（`deleteClipboardItems`）已验证后端 `delete_items` 支持批量 id 列表。缺的是把同样的 id 列表模式复制到 4 个操作。
@@ -53,6 +57,10 @@
 ---
 
 ### P0-2 HTML / RTF / Markdown 富文本预览 —— 刻意的「纯文本行」设计需要升级为可选渲染管道
+
+> ✅ **已实施**（`e70d1c7`）。设置加 `rich_text_mode: off/textOnly/rich`（默认 rich）+ `render_markdown`（默认关）；payload 增 `html` 字段（`preview_html` 纯函数：html 条目带源、rtf 经 `clipboard::rtf_to_html`；macOS 走 NSAttributedString 文档 API，Windows 返回 None 降级纯文本——方案认可的备选，Maccy 同款；脱敏条目不带）。前端 `RichTextViewer`：DOMPurify 白名单（29 标签 + 4 类属性，禁 style/data-attr）+ `<iframe sandbox srcDoc>`（无 allow-scripts/allow-same-origin，高度固定填面板内部滚动——无 same-origin 无法测内容高度，方案风险栏已预见）+ >256KB 降级提示条。`MarkdownPreview` 手写行级渲染（先全转义再替换，再过 DOMPurify）。
+> **验证**：XSS 14 样本全过（script/onerror/javascript:/vbscript:/data:/iframe/object/embed/svg/form/style，临时 jsdom 目录跑完即删）。
+> **实施偏差**：方案原设想 iframe 高度自适应（读 contentWindow.scrollHeight），因不给 `allow-same-origin` 父页面无法读 iframe DOM——按风险栏预案改为固定高度 + 内部滚动，安全边界优先。
 
 **对标**：CopyQ、PasteBar（4 缺 2，CopyQ 的原生预览、PasteBar 的卡片富文本渲染）。这是目前预览体验与竞品差距最大的一处。
 
@@ -79,6 +87,8 @@
 
 ### P0-3 图片预览降采样 —— 480px 面板不应解码整张原图
 
+> ✅ **已实施**（`65706ed`，与 mimalloc 同批）。`ImageStore` 第二档 `ensure_preview_image`（长边 960px 覆盖 2x DPI），落盘 `previews/<分片>/<hash>.png` 幂等懒生成；预览 payload 优先 preview 档、meta 仍显示原图真实宽高与字节；`remove` / `clean_resource_cache` / 备份覆盖导入的清理路径同步覆盖新目录。顺手修 image crate thumbnail 只缩不放 bug（小图被强行放大）。
+
 **对标**：Maccy 预览小图直出、CopyQ 缩略图体系（4 产品里 2 个对小图有专门处理）。这不是抄竞品，是通用图形学常识：**面板 480×480 像素，却把 4000×3000 的截图原图解码进 WebView 解码器，解码内存 ≈ 宽×高×4 字节 = 48MB 瞬时尖峰**，悬停预览频繁触发时反复尖峰。
 
 **现状已核实**：`get_clipboard_preview_payload`（`commands/clipboard.rs:1059` `build_clipboard_preview_payload`）对 image 条目直接取 `image_store.origin_path` 传给前端；前端 `ImageViewer` 用原图路径 `object-contain` 渲染。列表卡片用 `ensure_thumbnail`（300px）懒生成缩略图，但预览面板没有对应档位。
@@ -99,6 +109,12 @@
 ## 二、P1 性能热点（监听热路径与搜索）
 
 ### P1-1 监听热路径正则成本短路 + Settings 快照去 clone
+
+> ✅ **已实施**（主体 `ab91fee`，图标异步化子项补齐 `edfaa03`）。
+> - 4KB 闸门：`detect_text_sub_kind` 只识别前 4KB（UTF-8 边界回退完整字符）；`path` 分支不做 `exists()`，只判绝对路径形态，存在性延后到动作执行。多字节截断与超长 URL 前缀命中有专门测试。
+> - secrets 预筛：❌ **试验后回退**——「字面前缀预筛 + 命中者正则」实测（16ms/69ms）比 regex 全串（9ms/51ms）**更慢**，regex crate 本身已高度优化；回退全串方案，微基准 `hot_path_bench_large_plain_text` 保留用于防回归与后续优化对照。
+> - cleanup tick 版本号：`SettingsStore` 增 `AtomicU64` version（update/reset/replace/rebase 自增，只读 snapshot 不变），tick 只比对版本号，设置未变不再深拷整个 Settings。
+> - 源应用图标异步化（补齐 `edfaa03`）：`detect_frontmost` 从携带 icon PNG 字节改为只带 `icon_path`（监听线程零 OS 抽取）；`materialize_source` 变纯缓存查询（registry 命中零成本）；未命中经 `spawn_materialize_icon` 在 `spawn_blocking` 抽取 + upsert（幂等），条目先入库、icon 后补，前端期间按应用名回退。
 
 **现状已核实**（代码级确认，`detect.rs:51-67`、`secrets.rs`、`ingest.rs:159,208`）：
 
@@ -123,6 +139,8 @@
 
 ### P1-2 CJK 双字词搜索治理 —— trigram 的中文盲区（本轮：提示 + 护栏，不动分词器）
 
+> ✅ **已实施**（`ab91fee`，与 P1-3 同批）。前端 `SearchShortKeywordHint`：任一分词 <3 字符时搜索框下一次性轻提示（不阻断，LIKE 照跑）；COUNT 侧护栏由 P1-3 的 skip_count 一并覆盖。
+
 **现状已核实**：FTS5 用 `trigram` 分词器（按 3 字符切片建索引），关键词所有分词 ≥3 字符走 FTS，**任一分词 1–2 字符（含 CJK 双字词——中文最高频搜索形态）降级 `LIKE '%kw%'` 全表扫描**（匹配列 `COALESCE(search_text, content)` + `note`，见 `db/items.rs` 的 `KeywordFilter` 分流）。trigram 索引结构决定了 2 字符词无法走索引，这是前两轮已知但未动的真问题。
 
 **索引方案评估结论（先给判决再给动作）**：2 字符查询没有任何可行的 trigram 改写（前缀通配 `*` 对 trigram 不适用，构造合成 3-gram 需要预知后续字符）；换分词器（unicode61/jieba 系）需重建存量 FTS 表 + 重写触发器与搜索 SQL 全链路，且中文分词没有完美方案——**列为明确不做**。中文双字词 LIKE 在万条级历史（几十 MB）下全表扫描量级在几十毫秒，是「可感知但可接受」的代价。
@@ -133,6 +151,9 @@
 2. **COUNT 侧护栏**：短词 LIKE 的主要风险不在取数（有 LIMIT 分页兜底）而在 COUNT 同样全表扫（见 P1-3 一并治理：搜索态 COUNT 缓存 + `has_more` 长度判定后，短词搜索的每页成本收敛为 1 条带 LIMIT 的 SQL）。
 
 ### P1-3 翻页 COUNT 治理 —— 每页两条 SQL 的消解
+
+> ✅ **已实施**（`ab91fee`）。`ClipboardItemQuery` 增 `skip_count`：同过滤组合下前端只有第一次请求带 COUNT（`totalKnownRef`），此后翻页跳过 COUNT、Rust 返回哨兵 -1，沿用本地 total（reload/query 变化时重置）；`has_more` 双语义——COUNT 路径精确判定、skip_count 路径长度判定（`len == limit`），整除页最坏多一次空请求换每页省一条 COUNT（方案推荐的取舍）。附哨兵与版本号仓储测试。
+> ❌ 子项 4（`attach_file_entries` 的 exists/metadata 合并 `symlink_metadata`）：方案自评「收益小，归入 P3 打包」，且 FileIconCache 的 DB 查询批量化在第二轮已完成，剩余仅每路径 2-3 次 stat——**确认不做**。
 
 **现状已核实**：`query_items_page` 每次翻页都伴随一条同过滤条件的 `COUNT(*)`（`fetch_items_count`），搜索态翻页成本翻倍；且前端 PAGE_SIZE=30、CACHE 180 行内翻页都在 Rust 侧反复拉。
 
@@ -153,6 +174,8 @@
 
 ### P2-1 主窗口空闲销毁策略（可选）—— Permanent 保活是常驻 RSS 最大单一来源
 
+> ✅ **已实施**（`67294c7`）。设置 `clipboard.window.idle_destroy_main`（默认 false，schema 挂在 lightweightMode 下随其禁用）。生命周期三处适配：销毁计时器与 dormant 计时器互斥（开启销毁则不挂 dormant 冻结）；`try_destroy_idle` 接受 HiddenWarm|Dormant 两阶段（主窗口隐藏 5s 进 dormant 后销毁判定不再卡 Stale）且到点重读开关（计时期间用户关开关则放弃销毁）。descriptor 给 clipboard 补 `build_clipboard_window`（完整复刻 tauri.conf.json 承重属性：transparent/always_on_top/focusable(false)/skip_taskbar/accept_first_mouse 等）；macOS 重建后 `setup_clipboard_panel_rebuilt` 重新 panel 化（不动 dock 可见性）。新增 dormant 代次不变测试。唤出重建走既有 `show_window` 的 rebuild 分支 + 前端首帧骨架（361224a 已备）。
+
 **现状已核实**：`window/lifecycle/descriptor.rs:60` 主窗口（clipboard）`RetainPolicy::Permanent`——永不销毁 WebView。其余窗口（preference/update/onboarding/preview）已空闲销毁。主窗口是使用频率最高的窗口，保活换来「再次唤出 0ms」的体验；但 `lightweight_mode` 下主窗口隐藏 5s 后进入 `Dormant` 只暂停前端刷新，**WebView 进程 + React 树 + range cache 180 行依旧常驻**。以 Tauri WebView2/WebKit 常态 ~50-100MB RSS 估算，主窗口保活贡献了后台 RSS 的大头。
 
 **方案**：设置新增 `clipboard.window.idle_destroy_main: bool`（默认 false，即维持现状保活）：
@@ -167,6 +190,8 @@
 
 ### P2-2 mimalloc —— 一行依赖换全局长尾内存收益
 
+> ✅ **已实施**（`65706ed`，与 P0-3 同批）。`Cargo.toml` 加 `mimalloc = "0.1"` + `lib.rs` 全局分配器声明。
+
 **现状已核实**：`Cargo.toml` 无任何分配器依赖，系统默认分配器（Windows nt heap / macOS malloc）。Rust 服务端与桌面应用社区有大量实证：mimalloc 对长尾内存碎片、高 churn 场景（本项目的监听入库、列表 enrich、图片缩略图生成）有 5-20% RSS 收益，Windows 上尤其明显。
 
 **方案**：`Cargo.toml` 加 `mimalloc = "0.1"`，`lib.rs` 顶部 `#[global_allocator] static GLOBAL: MiMalloc = MiMalloc;`。一行依赖，两端同源行为。
@@ -176,6 +201,8 @@
 **风险**：低。mimalloc 是微软维护的成熟分配器，Tauri 生态常用（tauri 官方模板默认无，但社区应用广泛）；唯一注意点是与 WebView2 的堆隔离（WebView 自己的进程不受影响，收益作用于 Rust 侧进程，符合预期——Rust 进程正是我们可控的那部分）。
 
 ### P2-3 内存可观测性 —— 无观测即无优化
+
+> ✅ **已实施**（`f2ab1ab`）。`get_process_memory_stats` 命令（诊断面板显示 + 手动刷新）+ 前端 `performance.memory`（WebView2 支持，WKWebView 显示 N/A）+ `scripts/mem-bench.ps1` / `mem-bench.sh` 基准脚本（启动基线 → 200 条混合复制 → 峰值 → 隐藏 5 分钟稳态，产出 CSV）。
 
 **现状已核实**：无任何内存 profiling/基准设施。前两轮所有「内存优化」都是静态分析推演，没有一条实测曲线。这违背性能工程基本原则，也让 P2-1/P2-2 的收益无法量化验证。
 
@@ -191,6 +218,8 @@
 **风险**：低。纯增量观测能力，无行为变化。
 
 ### P2-4 存储水位治理 —— 已有清理策略的补全
+
+> ✅ **已实施**（`f2ab1ab`）。cleanup 删除行数 ≥500 后自动 `PRAGMA wal_checkpoint(TRUNCATE)`（`checkpoint_if_bulk`，VACUUM 保持手动）；`clean_resource_cache` 扩展覆盖 `previews/` 目录；`get_storage_usage` 无需改动（round-2 已单次遍历）。
 
 **现状已核实**：有 retention/max_count/clear_on_exit 三策略，有手动 VACUUM，但**无自动 prune**：历史大量删除后 DB 空洞与 WAL 累积靠用户手动「压缩数据库」。且 `previews/` 新目录（P0-3）会新增磁盘占用。
 
@@ -212,6 +241,8 @@
 
 ### P3-1 图片预览灯箱（点击放大 / 滚轮缩放）
 
+> ✅ **已实施**（`ff3afae`）。预览 payload 增 `image_origin_path`；ImageViewer 点击开 antd Image 受控 preview（v6 用 `preview.open` + `preview.onOpenChange`，`onClose`/`onVisibleChanged` 已废弃）；原图只在灯箱加载（预览面板仍用 960px 降采样档，P0-3 分层）。关键机制：预览窗 `focusable(false)`，点击不会让主窗口 blur → 预览不被 hover-hide 链路关掉。
+
 **现状**：预览面板上限 480×480，`object-contain` 直接渲染，无缩放无放大，大图细节看不清。P0-3 落地后预览默认用 960px 降采样图，原图只在灯箱加载。
 
 **方案**：预览面板内图片点击 → 展开全屏灯箱（复用 antd `Image` 组件的 preview 体系，或 motion 实现轻量版：原图 `convertFileSrc` + 滚轮缩放 0.5-4x + 拖拽平移 + Esc/点击关闭）。灯箱用原图路径（此时才付出整图解码成本，单次、用户主动触发，可接受）；关闭后内存随浏览器解码缓存自然回收。灯箱打开期间预览面板的悬停关闭逻辑让路（复用现有 pointerout 兜底 + 灯箱层吞事件）。
@@ -219,6 +250,8 @@
 **验收**：大图预览 → 点击放大 → 缩放/平移流畅 → Esc 关闭回到面板；灯箱期间不触发面板关闭；普通尺寸图片流程无退化。
 
 ### P3-2 列表加载反馈与回顶按钮
+
+> ✅ **已实施**（`361224a`）。loadingMore 骨架 Footer（Virtuoso `components.Footer`）+ 回顶按钮（scrollerRef 回调绑 scroll 监听，出现阈值一屏/回落半屏滞回；不能用 useEffect——loading 阶段 scroller 元素尚不存在）。
 
 **现状**：`loadingMore` 状态 hook 已返回但 List 未渲染（无限滚动加载下一页时无任何视觉反馈）；长列表滚动后无回到顶部入口。
 
@@ -228,6 +261,8 @@
 
 ### P3-3 密度预设三档
 
+> ✅ **已实施**（`361224a`）。`DensityPresetControl` 三档（紧凑 2/40/2、标准 3/64/3、舒适 5/100/5）纯数据驱动高亮——只写三个既有设置项、无新字段，单项改动自然取消预设高亮。
+
 **现状**：密度只有逐项 clamp（textMaxLines 1-5 / imageMaxHeight 20-100 / fileMaxCount 1-5），用户要理解三个参数才能调出「紧凑」或「舒适」。
 
 **方案**：偏好页外观区加三档预设（紧凑 / 标准 / 舒适），点击映射到现有三项参数组合（如紧凑 = 2 行/40px/2 个，标准 = 现默认 3/64/3，舒适 = 5/100/5），只写三个现有设置项、不新增字段，预设按钮与单项调节并存（单项改动后预设高亮取消）。
@@ -235,6 +270,8 @@
 **验收**：三档切换立即生效；手动改单项后预设态清除；与现有 `window://lifecycle` dormant 冻结、line-clamp safelist 无冲突。
 
 ### P3-4 时间戳与快捷动作并行显示
+
+> ✅ **已实施**（`361224a`）。`ClipboardQuickActions` 改并行布局：时间戳常驻（降 opacity-40），动作按钮右侧弹入；>3 个动作折叠「…」Dropdown（`ItemActionLabels` 增 `more` 字段）。
 
 **现状**：卡片 meta 区时间戳与 hover 快捷动作按钮组互斥替换（hover 即失去时间信息，前端调研确认的体验缺口）。
 
@@ -264,6 +301,8 @@
 
 ## 六、实施顺序（建议五批提交，末批为可选档位）
 
+> ✅ 实际按此顺序完成，全部 8 个提交已入 `wait` 分支：f2ab1ab → 65706ed → ab91fee → 3ed4b89 → ff3afae → 361224a → e70d1c7 → edfaa03 → 67294c7（③的图标异步化子项在主体提交后单独补齐为 edfaa03，实际 9 个；④ 按方案拆为 4 个功能提交）。
+
 | 批次 | 内容 | 提交（Conventional Commits） |
 | --- | --- | --- |
 | ① 观测先行 | P2-3 内存观测 + 基准脚本 + P2-4 存储水位 | `feat: memory observability + storage watermark` |
@@ -275,6 +314,9 @@
 依赖关系：① 是 ②③④⑤ 所有内存/性能项的验收工具，先行；② 的 previews 目录清理依赖 P2-4 的 clean_resource_cache 扩展（同批或后批均可）；③ 与 ④ 相互独立可并行；④ 的 P3-1 灯箱依赖 P0-3 落地后的「预览默认降采样图、灯箱载原图」分层，同批实施；P0-2 富文本预览与 P0-3 都动 `get_clipboard_preview_payload`，建议 ②④ 之间按「② 先行、④ 在其后」排序避免二次改同一文件；P0-1 独立可并行；⑤ 风险面独立（主窗口重建链路），放在最后单独评估与点验。
 
 ## 七、总验收门槛
+
+> ✅ **验收结果**：`cargo clippy --all-targets --all-features -- -D warnings` 零警告；`cargo test` 215 项通过（含本轮新增的 FTS/哨兵/版本号/dormant 代次等回归测试，8 项 ignore 为需真实系统资源的桌面会话测试）；`pnpm lint` + `tsc --noEmit` 通过；两个收尾提交经 pre-commit 钩子（cargo fmt + clippy + biome）复验通过。安全验证：富文本预览 DOMPurify XSS 14 样本全过；备份 round-trip 单测证导出所选可被导入端消费。无 schema migration（全部设置项 `#[serde(default)]` 向后兼容，旧设置文件升级路径无损）。
+> ⚠️ 遗留：UI 人工点验因会话环境阻塞（UIA 劫持 + 截屏通道不可用）未逐项操作，替代验证为 Rust 单测全绿 + 前端 mock 套路。下次 `pnpm tauri dev` 真实会话优先点验：批量操作工具条与弹层、富文本预览渲染、灯箱放大、短词提示、密度预设切换，以及 P2-1 开启后的主窗口销毁→唤出重建链路（任务管理器验证 WebView 进程 RSS 归还、列表/滚动/分组恢复正常）。
 
 - `cargo fmt && cargo clippy --all-targets --all-features -- -D warnings && cargo test` 全绿；
 - `pnpm lint` + `tsc --noEmit` 通过；
