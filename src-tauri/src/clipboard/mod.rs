@@ -34,7 +34,9 @@ pub use rich_text::rtf_to_html;
 pub use sound::play_copy_sound;
 pub use source::detect_frontmost;
 pub use storage::ImageStore;
-pub use watcher::{init, materialize_source, persist_and_notify, WatcherPause};
+pub use watcher::{
+    init, materialize_source, persist_and_notify, spawn_materialize_icon, WatcherPause,
+};
 pub use write::write_to_clipboard;
 
 #[cfg(test)]

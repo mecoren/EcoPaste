@@ -12,8 +12,9 @@ use tauri_plugin_dialog::DialogExt;
 
 use crate::clipboard::{
     add_app_from_path, build_item_with_settings, delete_unreferenced_apps, detect_frontmost,
-    materialize_source, persist_and_notify, refresh_running_apps, sanitize_css_color, AppIconStore,
-    AppsRegistry, ClipboardReader, FileIconStore, ImageStore, WritebackGuard,
+    materialize_source, persist_and_notify, refresh_running_apps, sanitize_css_color,
+    spawn_materialize_icon, AppIconStore, AppsRegistry, ClipboardReader, FileIconStore, ImageStore,
+    WritebackGuard,
 };
 use crate::core::{AppError, Result};
 use crate::db::items::{
@@ -107,9 +108,21 @@ pub async fn read_clipboard(
         return Ok(None);
     };
 
-    let source_app = source.map(|src| materialize_source(&app_icon_store, Some(&registry), src));
+    let (source_app, cached) = match source.as_ref().map(|src| {
+        let (app, cached) = materialize_source(&registry, src.clone());
+        (app, cached)
+    }) {
+        Some((app, cached)) => (Some(app), cached),
+        None => (None, true),
+    };
     if let Some(src) = &source_app {
         item.source_app_id = Some(src.id.clone());
+    }
+    if !cached {
+        // 缓存未命中的来源应用：异步补抽 icon（spawn_blocking），不阻塞本命令返回。
+        if let Some(src) = source {
+            spawn_materialize_icon(&app, &app_icon_store, &registry, src);
+        }
     }
 
     let pool = db.pool().await;

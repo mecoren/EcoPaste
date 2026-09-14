@@ -77,46 +77,83 @@ impl WatcherPause {
     }
 }
 
-/// 把同步抓到的 [`FrontmostApp`] 落 icon 字节 + 拼成可入库的 [`ClipboardApp`]。
-/// icon 落盘失败不阻断（仍保留应用名），仅 warn。
+/// 把探测到的 [`FrontmostApp`] 拼成可入库的 [`ClipboardApp`]。
 ///
-/// `registry` 命中缓存时优先复用，省掉一次 PNG 字节 sha256/IO；
-/// 缓存未命中再走 FrontmostApp.icon_png 路径，
-/// 并把结果回写缓存，让首次见到的应用后续直接命中。
-pub fn materialize_source(
-    store: &AppIconStore,
-    registry: Option<&AppsRegistry>,
-    src: FrontmostApp,
-) -> ClipboardApp {
-    if let Some(reg) = registry {
-        if let Some(cached) = reg.get(&src.id) {
-            return cached;
-        }
+/// 监听热路径的同步部分只做缓存查询：registry 命中缓存直接复用（多数复制事件
+/// 来自已见过的应用，零 OS 调用）；未命中的应用返回无 icon 的记录并返回 `false`，
+/// 由调用方在异步上下文里经 [`spawn_materialize_icon`] 补齐落库。
+pub fn materialize_source(registry: &AppsRegistry, src: FrontmostApp) -> (ClipboardApp, bool) {
+    if let Some(cached) = registry.get(&src.id) {
+        return (cached, true);
     }
 
-    let icon_file = src
-        .icon_png
-        .as_deref()
-        .and_then(|bytes| match store.store(bytes) {
-            Ok(name) => Some(name),
-            Err(err) => {
-                log::warn!("app icon store failed for {}: {err}", src.id);
-                None
-            }
-        });
     let now = Utc::now();
     let app = ClipboardApp {
         id: src.id,
         name: src.name,
-        icon_file,
+        icon_file: None,
         platform: src.platform,
         created_at: now,
         updated_at: now,
     };
-    if let Some(reg) = registry {
-        reg.insert_into_cache(app.clone());
-    }
-    app
+    (app, false)
+}
+
+/// 异步补齐来源应用 icon 并落库：缓存未命中的应用在 `spawn_blocking` 里抽取 icon
+/// （shell 查询 + PNG 编码的毫秒级 OS 调用，不占监听线程），store 落盘失败仅 warn。
+/// 完成后回写 registry 缓存与 DB；图标缺失期间前端按应用名回退展示，下次拉取列表可见。
+pub fn spawn_materialize_icon(
+    app: &AppHandle,
+    icon_store: &AppIconStore,
+    registry: &AppsRegistry,
+    src: FrontmostApp,
+) {
+    let icon_store = icon_store.clone();
+    let registry = registry.clone();
+    let app_handle = app.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let icon_path = src.icon_path.clone();
+        let extract_id = src.id.clone();
+        let png = tauri::async_runtime::spawn_blocking(move || {
+            icon_path
+                .as_deref()
+                .and_then(|path| super::icon::icon_png(path, None))
+        })
+        .await
+        .unwrap_or_else(|err| {
+            log::warn!("app icon extract task join failed for {extract_id}: {err}");
+            None
+        });
+
+        let icon_file = png
+            .as_deref()
+            .and_then(|bytes| match icon_store.store(bytes) {
+                Ok(name) => Some(name),
+                Err(err) => {
+                    log::warn!("app icon store failed for {}: {err}", src.id);
+                    None
+                }
+            });
+
+        // 期间并发的同 id 入库可能已补齐 icon；upsert 走「保留 created_at、刷新
+        // name/icon_file」，重复补齐幂等，最后写入者胜出，无害。
+        let now = Utc::now();
+        let materialized = ClipboardApp {
+            id: src.id,
+            name: src.name,
+            icon_file,
+            platform: src.platform,
+            created_at: now,
+            updated_at: now,
+        };
+        registry.insert_into_cache(materialized.clone());
+
+        let pool = app_handle.state::<crate::db::DatabaseState>().pool().await;
+        if let Err(err) = upsert_app(&pool, &materialized).await {
+            log::warn!("app icon upsert failed for {}: {err}", materialized.id);
+        }
+    });
 }
 
 /// 去重入库 + emit「剪贴板更新」事件。监听回调与 `read_clipboard` 命令共用，
@@ -325,15 +362,27 @@ impl ClipboardHandler for ClipboardChangeHandler {
             return;
         }
 
-        let source_app =
-            source.map(|src| materialize_source(&self.app_icon_store, Some(&self.registry), src));
+        let (source_app, cached) = match source.as_ref().map(|src| {
+            let (app, cached) = materialize_source(&self.registry, src.clone());
+            (app, cached)
+        }) {
+            Some((app, cached)) => (Some(app), cached),
+            None => (None, true),
+        };
         if let Some(src) = &source_app {
             item.source_app_id = Some(src.id.clone());
         }
 
         // 入库与 emit 交给异步运行时；只移动 Send 数据，不碰平台句柄。
+        // 缓存未命中的来源应用：把原始探测结果移进异步任务补抽 icon（监听线程零 OS 抽取）。
         let app = self.app.clone();
+        let app_icon_store = self.app_icon_store.clone();
+        let registry = self.registry.clone();
+        let pending_icon_source = if cached { None } else { source };
         tauri::async_runtime::spawn(async move {
+            if let Some(src) = pending_icon_source {
+                spawn_materialize_icon(&app, &app_icon_store, &registry, src);
+            }
             let pool = app.state::<crate::db::DatabaseState>().pool().await;
             if let Err(err) = persist_and_notify(&app, &pool, item, source_app.as_ref()).await {
                 log::error!("clipboard watcher: persist failed: {err}");
