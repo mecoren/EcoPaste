@@ -16,6 +16,7 @@
   "error": "{{label}}失败：{{message}}",
   "labels": {
     "addApp": "添加应用",
+    "batchUpdateItems": "批量更新记录",
     "cancelFavorite": "取消收藏",
     "changeStorageLocation": "更改数据目录",
     "checkForUpdates": "检查更新",
@@ -95,6 +96,7 @@
     "clipboardGroupsLayoutSaved": "已保存分组布局",
     "clipboardItemsCleared": "已清空 {{count}} 条记录",
     "clipboardItemsDeleted": "已删除 {{count}} 条记录",
+    "clipboardItemsUpdated": "已更新 {{count}} 条记录",
     "copied": "已复制",
     "databaseCompacted": "数据库已压缩，当前大小 {{size}}",
     "deleted": "已删除",

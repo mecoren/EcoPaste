@@ -20,10 +20,13 @@ import {
   getClipboardItem,
   hideWindow,
   listClipboardGroups,
+  moveClipboardItemsToGroup,
   openClipboardItemLink,
   pasteClipboardItem,
   revealClipboardItem,
   saveClipboardImageToFile,
+  setClipboardItemsFavorite,
+  setClipboardItemsPinned,
   toggleClipboardItemFavorite,
   toggleClipboardItemPinned,
   updateClipboardItemGroup,
@@ -43,6 +46,7 @@ import { WINDOW_LABEL } from "@/constants/windows";
 import { useClipboardItems } from "@/hooks/useClipboardItems";
 import { useKeyboardEvent } from "@/hooks/useKeyboardEvent";
 import { useTauriListen } from "@/hooks/useTauriListen";
+import BackupExportModal from "@/pages/Preference/components/BackupExportModal";
 import { clipboardStatsState } from "@/stores/clipboardStats";
 import {
   clearClipboardSearch,
@@ -64,8 +68,10 @@ import {
   isSpaceKey,
   useClipboardPreviewController,
 } from "../hooks/useClipboardPreviewController";
+import BatchActionToolbar from "./BatchActionToolbar";
 import ClipboardCard from "./cards/ClipboardCard";
 import EditModal from "./EditModal";
+import GroupPickerModal from "./GroupPickerModal";
 import NoteModal from "./NoteModal";
 
 /** 前 10 项的快捷键：index 0-8 对应 1-9，index 9 对应 0 */
@@ -99,6 +105,10 @@ const List: FC = () => {
   // 多选批量删除的选中集（Ditto/CopyQ 标配）：Ctrl/Cmd+Click 单选切换、
   // Shift+↑/↓ 从锚点扩展；空集时所有快捷键维持单条语义。
   const [multiSelectedIds, setMultiSelectedIds] = useState<string[]>([]);
+  // 批量「移动到分组」弹层开合。
+  const [groupPickerOpen, setGroupPickerOpen] = useState(false);
+  // 批量「导出所选」弹层开合（复用偏好页备份导出弹窗，携带所选 id）。
+  const [batchExportOpen, setBatchExportOpen] = useState(false);
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const isAtTopRef = useRef(true);
   const itemElementMapRef = useRef(new Map<string, HTMLDivElement>());
@@ -660,6 +670,70 @@ const List: FC = () => {
   };
 
   /**
+   * 批量设置收藏态：全未收藏 → 收藏；任一已收藏 → 取消收藏（与单条快捷键
+   * 「读当前态取反」同语义，但批量下按选中集整体决策）。
+   */
+  const handleBatchFavorite = async () => {
+    const targets = multiSelectedIds
+      .map((id) => findItemById(id))
+      .filter((item): item is ClipboardItem => item !== null);
+
+    if (targets.length === 0) return;
+
+    const next = !targets.every((item) => item.isFavorite);
+
+    await setClipboardItemsFavorite(
+      targets.map((item) => item.id),
+      next,
+    );
+
+    // 收藏分组下取消收藏的条目应移出列表，其余分组仅刷新标记；统一走当前页刷新。
+    reloadCurrentRange();
+  };
+
+  /**
+   * 批量设置置顶态：与单条同语义（选中集整体取反决策）；置顶影响排序，
+   * 成功后刷新当前范围继续信任后端顺序。
+   */
+  const handleBatchPinned = async () => {
+    const targets = multiSelectedIds
+      .map((id) => findItemById(id))
+      .filter((item): item is ClipboardItem => item !== null);
+
+    if (targets.length === 0) return;
+
+    const next = !targets.every((item) => item.isPinned);
+
+    await setClipboardItemsPinned(
+      targets.map((item) => item.id),
+      next,
+    );
+
+    reloadCurrentRange();
+  };
+
+  /**
+   * 批量移动到分组：选择弹层回填目标分组后执行；移动后刷新当前页
+   * （分组视图下条目归属变化，交给后端重排）。
+   */
+  const handleBatchMoveGroup = async (groupId: string | null) => {
+    setGroupPickerOpen(false);
+
+    const targets = multiSelectedIds
+      .map((id) => findItemById(id))
+      .filter((item): item is ClipboardItem => item !== null);
+
+    if (targets.length === 0) return;
+
+    await moveClipboardItemsToGroup(
+      targets.map((item) => item.id),
+      groupId,
+    );
+
+    reloadCurrentRange();
+  };
+
+  /**
    * 快捷键触发的收藏切换：读当前项的 isFavorite 计算下一态，
    * Rust 返回真实状态后走统一的 `handleFavoriteToggled`（favorite 分组内取消会移除）。
    */
@@ -1057,6 +1131,41 @@ const List: FC = () => {
       role="listbox"
     >
       <VirtuosoScroller>{renderVirtuoso}</VirtuosoScroller>
+
+      <BatchActionToolbar
+        onBatchDelete={handleBatchDelete}
+        onBatchExport={() => {
+          setBatchExportOpen(true);
+        }}
+        onBatchFavorite={handleBatchFavorite}
+        onBatchMoveGroup={() => {
+          setGroupPickerOpen(true);
+        }}
+        onBatchPinned={handleBatchPinned}
+        onClearSelection={clearMultiSelection}
+        selectedCount={multiSelectedIds.length}
+      />
+
+      <GroupPickerModal
+        onCancel={() => {
+          setGroupPickerOpen(false);
+        }}
+        onPick={handleBatchMoveGroup}
+        open={groupPickerOpen}
+      />
+
+      {multiSelectedIds.length > 0 ? (
+        <BackupExportModal
+          itemIds={multiSelectedIds}
+          onCancel={() => {
+            setBatchExportOpen(false);
+          }}
+          onExported={() => {
+            setBatchExportOpen(false);
+          }}
+          open={batchExportOpen}
+        />
+      ) : null}
 
       <EditModal
         item={editTarget}

@@ -7,6 +7,7 @@ import {
   type BackupExportMode,
   type ExportHistoryBackupResult,
   exportHistoryBackup,
+  exportItemsBackup,
 } from "@/commands";
 import { log } from "@/utils/log";
 
@@ -17,6 +18,11 @@ interface BackupExportModalProps {
   open: boolean;
   onCancel: () => void;
   onExported: (result: ExportHistoryBackupResult) => void;
+  /**
+   * 传入即走「所选条目」导出（多选工具条）：只打包所选记录；
+   * 不传保持全量历史导出行为。
+   */
+  itemIds?: string[];
 }
 
 interface BackupExportForm {
@@ -31,7 +37,11 @@ interface BackupExportForm {
  */
 const BackupExportModal: FC<BackupExportModalProps> = (props) => {
   const { t } = useTranslation(["preferences", "common"]);
-  const { open, onCancel, onExported } = props;
+  const { open, onCancel, onExported, itemIds } = props;
+  const isItemsExport = typeof itemIds !== "undefined";
+  const modalTitle = isItemsExport
+    ? t("preferences:backup.export.titleItems")
+    : t("preferences:backup.export.title");
   const [form] = Form.useForm<BackupExportForm>();
   const [loading, setLoading] = useState(false);
   const [plainReadSecondsLeft, setPlainReadSecondsLeft] =
@@ -111,7 +121,7 @@ const BackupExportModal: FC<BackupExportModalProps> = (props) => {
   };
 
   /**
-   * 打开保存对话框并生成带秒级时间戳的默认备份名。
+   * 打开保存对话框并生成带秒级时间戳的默认备份名（所选条目导出用 `Items` 后缀区分）。
    */
   const pickTargetPath = async () => {
     const now = new Date();
@@ -126,7 +136,7 @@ const BackupExportModal: FC<BackupExportModalProps> = (props) => {
     ].join("");
 
     return await save({
-      defaultPath: `EcoPaste-Backup-${stamp}.${BACKUP_EXTENSION}`,
+      defaultPath: `EcoPaste-Backup-${stamp}${isItemsExport ? "-Items" : ""}.${BACKUP_EXTENSION}`,
       filters: [
         {
           extensions: [BACKUP_EXTENSION],
@@ -146,10 +156,14 @@ const BackupExportModal: FC<BackupExportModalProps> = (props) => {
 
     setLoading(true);
     try {
-      const result = await exportHistoryBackup(targetPath, {
+      const options = {
         mode: values.mode,
         password: isEncryptedMode ? values.password : void 0,
-      });
+      };
+
+      const result = isItemsExport
+        ? await exportItemsBackup(itemIds ?? [], targetPath, options)
+        : await exportHistoryBackup(targetPath, options);
 
       form.resetFields();
       onExported(result);
@@ -170,7 +184,7 @@ const BackupExportModal: FC<BackupExportModalProps> = (props) => {
       onCancel={resetAndCancel}
       onOk={exportBackup}
       open={open}
-      title={t("preferences:backup.export.title")}
+      title={modalTitle}
     >
       <Form<BackupExportForm>
         form={form}

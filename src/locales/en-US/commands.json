@@ -16,6 +16,7 @@
   "error": "{{label}} failed: {{message}}",
   "labels": {
     "addApp": "Add app",
+    "batchUpdateItems": "Batch update records",
     "cancelFavorite": "Unfavorite",
     "changeStorageLocation": "Change data directory",
     "checkForUpdates": "Check for updates",
@@ -95,6 +96,7 @@
     "clipboardGroupsLayoutSaved": "Group layout saved",
     "clipboardItemsCleared": "Cleared {{count}} records",
     "clipboardItemsDeleted": "Deleted {{count}} records",
+    "clipboardItemsUpdated": "Updated {{count}} records",
     "copied": "Copied",
     "databaseCompacted": "Database compacted, current size {{size}}",
     "deleted": "Deleted",

@@ -1752,6 +1752,78 @@ pub async fn update_clipboard_item_group(
     crate::db::items::update_item_group(&pool, &id, Some(&group_id)).await
 }
 
+/// 批量设置收藏态（多选工具条）。完成后广播列表刷新，返回受影响行数。
+#[tauri::command]
+pub async fn set_clipboard_items_favorite(
+    app: AppHandle,
+    db: State<'_, DatabaseState>,
+    ids: Vec<String>,
+    favorite: bool,
+) -> Result<u64> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let pool = db.pool().await;
+    let affected = crate::db::items::set_items_favorite(&pool, &ids, favorite).await?;
+    emit_items_updated(&app);
+    Ok(affected)
+}
+
+/// 批量设置置顶态（多选工具条）。置顶影响排序，前端收到事件后整页刷新。
+#[tauri::command]
+pub async fn set_clipboard_items_pinned(
+    app: AppHandle,
+    db: State<'_, DatabaseState>,
+    ids: Vec<String>,
+    pinned: bool,
+) -> Result<u64> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let pool = db.pool().await;
+    let affected = crate::db::items::set_items_pinned(&pool, &ids, pinned).await?;
+    emit_items_updated(&app);
+    Ok(affected)
+}
+
+/// 批量移动条目到分组（多选工具条）。`group_id = None` 移出分组。
+/// 分组存在性校验与单条 [`update_clipboard_item_group`] 同语义。
+#[tauri::command]
+pub async fn move_clipboard_items_to_group(
+    app: AppHandle,
+    db: State<'_, DatabaseState>,
+    ids: Vec<String>,
+    group_id: Option<String>,
+) -> Result<u64> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let pool = db.pool().await;
+    if let Some(group_id) = &group_id {
+        let exists = crate::db::groups::list_groups(&pool)
+            .await?
+            .iter()
+            .any(|group| &group.id == group_id);
+        if !exists {
+            return Err(AppError::Clipboard("分组不存在".to_owned()));
+        }
+    }
+
+    let affected = crate::db::items::move_items_to_group(&pool, &ids, group_id.as_deref()).await?;
+    emit_items_updated(&app);
+    Ok(affected)
+}
+
+/// 批量元数据变更后的统一广播：携带 `meta` 标记，前端按需刷新当前页。
+fn emit_items_updated(app: &AppHandle) {
+    if let Err(err) = app.emit(CLIPBOARD_UPDATED_EVENT, serde_json::json!({ "meta": true })) {
+        log::warn!("emit items updated event failed: {err}");
+    }
+}
+
 /// 打开条目 URL：按 `id` 取完整 `content`，trim 后用系统默认浏览器/邮件 client 打开。
 /// `mailto = true` 时自动补 `mailto:` 前缀，供右键菜单「发送邮件」复用。
 /// 仅适用于 text 类条目；files 类调用方应改用 `reveal_clipboard_item`。

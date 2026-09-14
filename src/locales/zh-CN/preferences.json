@@ -23,7 +23,8 @@
       "plainConfirmRequired": "请确认明文备份风险",
       "plainWarning": "任何拿到文件的人都可以直接读取备份内容。",
       "plainWarningTitle": "明文备份不受密码保护",
-      "title": "导出 EcoPaste 备份"
+      "title": "导出 EcoPaste 备份",
+      "titleItems": "导出所选记录"
     },
     "fileFilter": "EcoPaste 备份",
     "import": {

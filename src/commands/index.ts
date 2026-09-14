@@ -194,6 +194,18 @@ export interface ExportHistoryBackupResult {
   mode: BackupExportMode;
 }
 
+export interface ExportItemsBackupResult {
+  path: string;
+  totalBytes: number;
+  itemCount: number;
+  textCount: number;
+  imageCount: number;
+  filesCount: number;
+  resourceBytes: number;
+  exportedAt: string;
+  mode: BackupExportMode;
+}
+
 export interface InspectHistoryBackupInput {
   path: string;
   source?: BackupReceiveSource;
@@ -676,6 +688,31 @@ export const exportHistoryBackup = async (
       options,
       targetPath,
     },
+  );
+
+  getMessageApi().success(
+    i18n.t("commands:messages.backupExported", {
+      count: result.itemCount,
+      size: formatCommandBytes(result.totalBytes),
+    }),
+  );
+
+  return result;
+};
+
+/**
+ * 把多选工具条所选条目导出为 `.ecopastebak`（格式与全量备份一致，导入端无差别）。
+ * 成功后 toast 实际导出条数与备份大小；取消保存路径时上层不发调用。
+ */
+export const exportItemsBackup = async (
+  ids: string[],
+  targetPath: string,
+  options: ExportHistoryBackupOptions,
+) => {
+  const result = await call<ExportItemsBackupResult>(
+    TAURI_COMMAND.EXPORT_ITEMS_BACKUP,
+    "commands:labels.exportBackup",
+    { ids, options, targetPath },
   );
 
   getMessageApi().success(
@@ -1258,6 +1295,72 @@ export const clearClipboardItems = async (): Promise<boolean> => {
   );
 
   return true;
+};
+
+/**
+ * 批量设置收藏态（多选工具条）。Rust 分块 UPDATE 后广播刷新，返回受影响行数。
+ */
+export const setClipboardItemsFavorite = async (
+  ids: string[],
+  favorite: boolean,
+) => {
+  if (ids.length === 0) return 0;
+
+  const affected = await call<number>(
+    TAURI_COMMAND.SET_CLIPBOARD_ITEMS_FAVORITE,
+    "commands:labels.batchUpdateItems",
+    { favorite, ids },
+  );
+
+  getMessageApi().success(
+    i18n.t("commands:messages.clipboardItemsUpdated", { count: affected }),
+  );
+
+  return affected;
+};
+
+/**
+ * 批量设置置顶态（多选工具条）。置顶影响排序，事件驱动刷新当前页。
+ */
+export const setClipboardItemsPinned = async (
+  ids: string[],
+  pinned: boolean,
+) => {
+  if (ids.length === 0) return 0;
+
+  const affected = await call<number>(
+    TAURI_COMMAND.SET_CLIPBOARD_ITEMS_PINNED,
+    "commands:labels.batchUpdateItems",
+    { ids, pinned },
+  );
+
+  getMessageApi().success(
+    i18n.t("commands:messages.clipboardItemsUpdated", { count: affected }),
+  );
+
+  return affected;
+};
+
+/**
+ * 批量移动条目到分组；`groupId` 传 `null` 移出分组。
+ */
+export const moveClipboardItemsToGroup = async (
+  ids: string[],
+  groupId: string | null,
+) => {
+  if (ids.length === 0) return 0;
+
+  const affected = await call<number>(
+    TAURI_COMMAND.MOVE_CLIPBOARD_ITEMS_TO_GROUP,
+    "commands:labels.batchUpdateItems",
+    { groupId, ids },
+  );
+
+  getMessageApi().success(
+    i18n.t("commands:messages.clipboardItemsUpdated", { count: affected }),
+  );
+
+  return affected;
 };
 
 /**

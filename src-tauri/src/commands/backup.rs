@@ -7,8 +7,8 @@ use tauri::AppHandle;
 
 use crate::backup::{
     BackupContainerMode, BackupReceiveSource, BackupReceivedPayload, ExportHistoryBackupOptions,
-    ExportHistoryBackupResult, ImportHistoryBackupInput, ImportHistoryBackupOptions,
-    ImportHistoryBackupResult,
+    ExportHistoryBackupResult, ExportItemsBackupInput, ExportItemsBackupResult,
+    ImportHistoryBackupInput, ImportHistoryBackupOptions, ImportHistoryBackupResult,
 };
 use crate::core::Result;
 use crate::db::DatabaseState;
@@ -47,6 +47,17 @@ pub async fn export_history_backup(
 ) -> Result<ExportHistoryBackupResult> {
     let pool = db.pool().await;
     crate::backup::export_history_backup(&app, &pool, target_path, options).await
+}
+
+/// 把多选工具条所选条目导出为 `.ecopastebak`（部分备份，格式与全量一致）。
+#[tauri::command]
+pub async fn export_items_backup(
+    app: AppHandle,
+    db: tauri::State<'_, DatabaseState>,
+    input: ExportItemsBackupInput,
+) -> Result<ExportItemsBackupResult> {
+    let pool = db.pool().await;
+    crate::backup::export_items_backup(&app, &pool, input).await
 }
 
 /// 识别备份文件并广播给偏好页；不解密、不导入。

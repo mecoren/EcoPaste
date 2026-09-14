@@ -1,4 +1,16 @@
 {
+  "batchToolbar": {
+    "clearSelection": "清空选中",
+    "delete": "批量删除",
+    "export": "导出所选",
+    "favorite": "批量收藏",
+    "loadingGroups": "加载分组…",
+    "moveGroup": "移动到分组",
+    "noGroups": "暂无分组",
+    "pinned": "批量置顶",
+    "removeFromGroup": "移出分组",
+    "selected": "已选 {{count}} 项"
+  },
   "edit": {
     "emptyHint": "内容不能为空",
     "placeholder": "输入新的文本内容...",

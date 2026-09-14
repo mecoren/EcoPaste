@@ -26,6 +26,7 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::core::{AppError, Result};
+use crate::db::models::ClipboardGroup;
 
 pub const BACKUP_EXTENSION: &str = "ecopastebak";
 pub const BACKUP_RECEIVED_EVENT: &str = "backup://received";
@@ -76,6 +77,17 @@ pub struct ExportHistoryBackupOptions {
     pub password: Option<String>,
 }
 
+/// 批量导出所选条目为 `.ecopastebak`：多选工具条「导出」入口。
+/// 格式与全量备份完全一致（manifest + 过滤库 + 资源子集 + 当前设置快照），
+/// 导入端无需感知「这是部分备份」。不存在的 id 静默跳过；全空时报错。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportItemsBackupInput {
+    pub ids: Vec<String>,
+    pub target_path: String,
+    pub options: ExportHistoryBackupOptions,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportHistoryBackupInput {
@@ -108,6 +120,21 @@ pub enum BackupExportMode {
 pub struct ExportHistoryBackupResult {
     pub path: String,
     pub total_bytes: u64,
+    pub item_count: i64,
+    pub text_count: i64,
+    pub image_count: i64,
+    pub files_count: i64,
+    pub resource_bytes: u64,
+    pub exported_at: DateTime<Utc>,
+    pub mode: BackupExportMode,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportItemsBackupResult {
+    pub path: String,
+    pub total_bytes: u64,
+    /// 实际写入备份的条目数（源库中不存在的 id 已被剔除）。
     pub item_count: i64,
     pub text_count: i64,
     pub image_count: i64,
@@ -192,7 +219,7 @@ struct BackupManifest {
     resource_bytes: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 enum ManifestEncryption {
     None,
@@ -245,6 +272,63 @@ pub async fn export_history_backup(
         resource_bytes,
         exported_at,
         mode: options.mode,
+    })
+}
+
+/// 把所选条目导出为 `.ecopastebak` 备份包（「所选条目」变体，见
+/// `ExportItemsBackupInput` 文档）。与全量导出共用 payload / container 组装，
+/// 区别只在数据源：临时目录里物化「过滤库 + 资源子集」，打包后整体丢弃。
+pub async fn export_items_backup(
+    app: &AppHandle,
+    pool: &SqlitePool,
+    input: ExportItemsBackupInput,
+) -> Result<ExportItemsBackupResult> {
+    if input.ids.is_empty() {
+        return app_error("请选择要导出的记录");
+    }
+
+    let target = normalize_backup_path(PathBuf::from(input.target_path))?;
+    let password = validate_password_options(&input.options)?;
+    let exported_at = Utc::now();
+
+    let work = tempfile::tempdir().context("failed to create items export work dir")?;
+    let filtered_db_path = work.path().join(DB_FILENAME);
+    let filtered_resources = work.path().join("resources");
+
+    let items = build_filtered_db(pool, &input.ids, &filtered_db_path).await?;
+    materialize_item_resources(pool, app, &items, &filtered_resources).await?;
+
+    let counts = count_filtered_items(&items);
+    let source_paths = BackupSourcePaths {
+        db_path: filtered_db_path,
+        resources_dir: filtered_resources.clone(),
+        settings_path: backup_source_paths(app)?.settings_path,
+    };
+    let resource_bytes = dir_size(&filtered_resources)?;
+    let package = app.package_info();
+    let manifest = build_manifest_with_identity(
+        &package.name,
+        &package.version.to_string(),
+        exported_at,
+        input.options.mode,
+        counts,
+        resource_bytes,
+    )?;
+
+    let payload_file = NamedTempFile::new().context("failed to create temporary backup payload")?;
+    write_payload_zip(&source_paths, payload_file.path(), &manifest, &target)?;
+    let total_bytes = write_container(&target, payload_file.path(), input.options.mode, password)?;
+
+    Ok(ExportItemsBackupResult {
+        path: target.to_string_lossy().into_owned(),
+        total_bytes,
+        item_count: counts.item_count,
+        text_count: counts.text_count,
+        image_count: counts.image_count,
+        files_count: counts.files_count,
+        resource_bytes,
+        exported_at,
+        mode: input.options.mode,
     })
 }
 
@@ -472,6 +556,184 @@ fn ensure_backup_extension(path: &Path) -> Result<()> {
     app_error(format!("请选择 .{BACKUP_EXTENSION} 备份文件"))
 }
 
+/// 在临时目录构建「条目过滤库」：新库跑完整 migrations 后，把所选条目连同
+/// 其引用的分组 / 来源应用维度行原样插入，FTS 由 INSERT 触发器自动重建。
+/// file_type_icons 是纯缓存表（cache_key 依赖目标机文件路径），不随行迁移，
+/// 导入端 [`crate::commands::clipboard::FileIconCache`] miss 后会重新抽取。
+/// 返回实际命中的条目（源库中不存在的 id 已被剔除），供资源物化与计数复用。
+async fn build_filtered_db(
+    pool: &SqlitePool,
+    ids: &[String],
+    db_path: &Path,
+) -> Result<Vec<crate::db::models::ClipboardItem>> {
+    let items = crate::db::items::list_items_by_ids(pool, ids).await?;
+    if items.is_empty() {
+        return app_error("所选记录不存在");
+    }
+
+    let options = SqliteConnectOptions::new()
+        .filename(db_path)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .foreign_keys(true);
+    let filtered = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .with_context(|| format!("failed to open filtered backup database at {db_path:?}"))?;
+
+    let result = async {
+        sqlx::migrate!("./migrations")
+            .run(&filtered)
+            .await
+            .context("failed to run migrations on filtered backup database")?;
+
+        copy_referenced_dimensions(pool, &filtered, &items).await?;
+        for item in &items {
+            crate::db::items::insert_item(&filtered, item).await?;
+        }
+
+        crate::core::Result::Ok(())
+    }
+    .await;
+
+    filtered.close().await;
+    result?;
+
+    Ok(items)
+}
+
+/// 把条目引用到的分组 / 来源应用行从源库复制到过滤库。
+/// 应用表全量复制（表本身只有被引用过的应用，量级 = 来源应用数）；
+/// 分组表只复制被引用的 id，避免把无关分组也带进「所选条目」备份。
+async fn copy_referenced_dimensions(
+    pool: &SqlitePool,
+    filtered: &SqlitePool,
+    items: &[crate::db::models::ClipboardItem],
+) -> Result<()> {
+    let mut group_ids: Vec<String> = items
+        .iter()
+        .filter_map(|item| item.group_id.clone())
+        .collect();
+    group_ids.sort_unstable();
+    group_ids.dedup();
+
+    for group_id in group_ids {
+        let row = sqlx::query_as::<_, ClipboardGroup>(
+            "SELECT id, name, icon, is_hidden, sort_order, created_at, updated_at \
+             FROM clipboard_groups WHERE id = ?",
+        )
+        .bind(&group_id)
+        .fetch_optional(pool)
+        .await
+        .context("failed to read referenced group for items export")?;
+
+        if let Some(group) = row {
+            crate::db::groups::insert_group(filtered, &group).await?;
+        }
+    }
+
+    let apps = crate::db::apps::list_all_apps(pool).await?;
+    for app in apps {
+        crate::db::apps::upsert_app(filtered, &app).await?;
+    }
+
+    Ok(())
+}
+
+/// 物化所选条目引用的磁盘资源到临时 resources 目录，布局与真实目录一致：
+/// - image 条目：`clipboard-images/origin/<分片>/<hash>.png` 原图（thumbnails /
+///   previews 是懒生成档，目标机取图时按需重建，不打包）；
+/// - 被引用来源应用的 icon：`app-icons/<hash>.png`（`icon_file = None` 的应用无文件）。
+///
+/// file-icons 目录是目标机路径相关的缓存，整体跳过（导入端 miss 后重新抽取）。
+async fn materialize_item_resources(
+    pool: &SqlitePool,
+    app: &AppHandle,
+    items: &[crate::db::models::ClipboardItem],
+    target_root: &Path,
+) -> Result<()> {
+    let resources = crate::core::paths::resources_dir(app)?;
+    let image_store = app.state::<crate::clipboard::ImageStore>();
+
+    for item in items {
+        if item.kind != crate::db::models::ClipboardKind::Image {
+            continue;
+        }
+
+        let origin = image_store.origin_path(&item.content);
+        if !origin.exists() {
+            log::warn!(
+                "export items backup: image origin missing for item {}, skip",
+                item.id
+            );
+            continue;
+        }
+
+        let relative = origin
+            .strip_prefix(&resources)
+            .with_context(|| format!("failed to locate {origin:?} under resources dir"))?;
+        copy_resource_file(&origin, &target_root.join(relative))?;
+    }
+
+    let mut app_ids: Vec<String> = items
+        .iter()
+        .filter_map(|item| item.source_app_id.clone())
+        .collect();
+    app_ids.sort_unstable();
+    app_ids.dedup();
+
+    let app_icon_store = app.state::<crate::clipboard::AppIconStore>();
+    for app_row in crate::db::apps::list_apps_by_ids(pool, &app_ids).await? {
+        let Some(icon_file) = app_row.icon_file.as_deref() else {
+            continue;
+        };
+        let source = app_icon_store.icon_path(icon_file);
+        if !source.exists() {
+            continue;
+        }
+
+        let relative = source
+            .strip_prefix(&resources)
+            .with_context(|| format!("failed to locate {source:?} under resources dir"))?;
+        copy_resource_file(&source, &target_root.join(relative))?;
+    }
+
+    Ok(())
+}
+
+/// 把一个资源文件复制进 items 导出的临时 resources 目录（自动建父目录）。
+fn copy_resource_file(source: &Path, target: &Path) -> Result<()> {
+    if target.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {parent:?} for items export"))?;
+    }
+    fs::copy(source, target)
+        .with_context(|| format!("failed to copy resource {source:?} into items export"))?;
+    Ok(())
+}
+
+/// 统计过滤条目的 kind 分布，manifest 与导出结果共用。
+fn count_filtered_items(items: &[crate::db::models::ClipboardItem]) -> BackupCounts {
+    let mut counts = BackupCounts {
+        item_count: items.len() as i64,
+        text_count: 0,
+        image_count: 0,
+        files_count: 0,
+    };
+    for item in items {
+        match item.kind {
+            crate::db::models::ClipboardKind::Image => counts.image_count += 1,
+            crate::db::models::ClipboardKind::Files => counts.files_count += 1,
+            _ => counts.text_count += 1,
+        }
+    }
+    counts
+}
+
 async fn checkpoint_database(pool: &SqlitePool) -> Result<()> {
     sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
         .execute(pool)
@@ -518,10 +780,31 @@ fn build_manifest(
     counts: BackupCounts,
     resource_bytes: u64,
 ) -> Result<BackupManifest> {
+    let package = app.package_info();
+    build_manifest_with_identity(
+        &package.name,
+        &package.version.to_string(),
+        exported_at,
+        mode,
+        counts,
+        resource_bytes,
+    )
+}
+
+/// [`build_manifest`] 的可测版本：manifest 组装本身不依赖运行时环境，
+/// 抽出字符串参数便于单测直接断言。
+fn build_manifest_with_identity(
+    app_name: &str,
+    app_version: &str,
+    exported_at: DateTime<Utc>,
+    mode: BackupExportMode,
+    counts: BackupCounts,
+    resource_bytes: u64,
+) -> Result<BackupManifest> {
     Ok(BackupManifest {
         format_version: FORMAT_VERSION,
-        app_name: app.package_info().name.to_string(),
-        app_version: app.package_info().version.to_string(),
+        app_name: app_name.to_owned(),
+        app_version: app_version.to_owned(),
         exported_at,
         platform: current_platform().to_owned(),
         encryption: match mode {
@@ -1660,5 +1943,370 @@ mod tests {
             imported,
             "merged sensitive item must keep is_sensitive = true"
         );
+    }
+
+    /// 批量导出核心装配：过滤库只含所选条目 + 其引用的分组；无关分组被剔除、
+    /// 来源应用维度保留；FTS 在过滤库内可命中；不存在的 id 静默跳过；全空报错。
+    #[tokio::test]
+    async fn build_filtered_db_keeps_selected_items_and_referenced_dimensions() {
+        use crate::db::apps::upsert_app;
+        use crate::db::groups::insert_group;
+        use crate::db::items::{content_hash, insert_item};
+        use crate::db::models::{
+            ClipboardApp, ClipboardGroup, ClipboardItem, ClipboardKind, Platform,
+        };
+        use crate::db::test_support::memory_pool;
+        use chrono::DateTime;
+
+        let ts = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+
+        let make_item = |id: &str, group_id: Option<&str>, search_text: Option<&str>| {
+            let content = format!("export body {id}");
+            ClipboardItem {
+                id: id.to_owned(),
+                kind: ClipboardKind::Text,
+                sub_kind: None,
+                group_id: group_id.map(str::to_owned),
+                source_app_id: Some("app.a".to_owned()),
+                content_hash: content_hash(ClipboardKind::Text, &content),
+                content,
+                search_text: search_text.map(str::to_owned),
+                summary: None,
+                file_types: None,
+                size: None,
+                width: None,
+                height: None,
+                use_count: 1,
+                is_favorite: false,
+                is_pinned: false,
+                is_sensitive: false,
+                platform: Platform::Macos,
+                note: None,
+                created_at: ts,
+                updated_at: ts,
+                source_app_name: None,
+                source_app_icon_file: None,
+                source_app_icon_path: None,
+                image_thumbnail_path: None,
+                file_entries: None,
+                files_preview_kind: None,
+                available_actions: Vec::new(),
+                color_preview: None,
+                display_created_at: String::new(),
+            }
+        };
+
+        let pool = memory_pool().await;
+        insert_group(
+            &pool,
+            &ClipboardGroup {
+                id: "keep".to_owned(),
+                name: "Keep".to_owned(),
+                icon: "i-lucide:folder".to_owned(),
+                is_hidden: false,
+                sort_order: 0,
+                created_at: ts,
+                updated_at: ts,
+            },
+        )
+        .await
+        .unwrap();
+        insert_group(
+            &pool,
+            &ClipboardGroup {
+                id: "drop".to_owned(),
+                name: "Drop".to_owned(),
+                icon: "i-lucide:folder".to_owned(),
+                is_hidden: false,
+                sort_order: 1,
+                created_at: ts,
+                updated_at: ts,
+            },
+        )
+        .await
+        .unwrap();
+        upsert_app(
+            &pool,
+            &ClipboardApp {
+                id: "app.a".to_owned(),
+                name: "App A".to_owned(),
+                icon_file: Some("aaaa.png".to_owned()),
+                platform: Platform::Macos,
+                created_at: ts,
+                updated_at: ts,
+            },
+        )
+        .await
+        .unwrap();
+        for (id, group) in [("e1", Some("keep")), ("e2", None), ("e3", Some("keep"))] {
+            let mut item = make_item(id, group, Some(&format!("export note {id}")));
+            item.content = format!("export body {id}");
+            item.content_hash = content_hash(ClipboardKind::Text, &item.content);
+            insert_item(&pool, &item).await.unwrap();
+        }
+        let mut unselected = make_item("e9", Some("drop"), Some("unselected body"));
+        unselected.content = "unselected body".to_owned();
+        unselected.content_hash = content_hash(ClipboardKind::Text, &unselected.content);
+        insert_item(&pool, &unselected).await.unwrap();
+
+        let temp = tempdir().unwrap();
+        let filtered_path = temp.path().join("filtered.db");
+        let items = build_filtered_db(
+            &pool,
+            &["e1".to_owned(), "e2".to_owned(), "missing".to_owned()],
+            &filtered_path,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(items.len(), 2, "missing id is skipped silently");
+
+        let counts = count_filtered_items(&items);
+        assert_eq!(counts.item_count, 2);
+        assert_eq!(counts.text_count, 2);
+        assert_eq!(counts.image_count, 0);
+
+        // Re-open the filtered database and assert its contents.
+        let options = SqliteConnectOptions::new()
+            .filename(&filtered_path)
+            .read_only(true);
+        let filtered = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+
+        let item_rows: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM clipboard_items ORDER BY id")
+                .fetch_all(&filtered)
+                .await
+                .unwrap();
+        assert_eq!(item_rows, vec!["e1".to_owned(), "e2".to_owned()]);
+
+        let group_rows: Vec<String> = sqlx::query_scalar("SELECT id FROM clipboard_groups")
+            .fetch_all(&filtered)
+            .await
+            .unwrap();
+        assert_eq!(
+            group_rows,
+            vec!["keep".to_owned()],
+            "unreferenced groups must not leak into the filtered db"
+        );
+
+        let app_rows: Vec<String> = sqlx::query_scalar("SELECT id FROM clipboard_apps")
+            .fetch_all(&filtered)
+            .await
+            .unwrap();
+        assert_eq!(app_rows, vec!["app.a".to_owned()]);
+
+        // FTS was rebuilt by the INSERT triggers inside the filtered db.
+        let fts_hits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM clipboard_items_fts WHERE clipboard_items_fts MATCH 'export'",
+        )
+        .fetch_one(&filtered)
+        .await
+        .unwrap();
+        assert_eq!(fts_hits, 2, "FTS must be rebuilt for the filtered rows");
+
+        filtered.close().await;
+
+        // All-missing ids is a user-facing error, not an empty backup.
+        let empty = build_filtered_db(
+            &pool,
+            &["nope-1".to_owned(), "nope-2".to_owned()],
+            &temp.path().join("empty.db"),
+        )
+        .await;
+        assert!(empty.is_err(), "exporting zero existing items must fail");
+    }
+
+    /// manifest 身份字段与 kind 计数：`build_manifest_with_identity` 直填字符串，
+    /// 加密模式映射为 `password`、明文映射为 `none`。
+    #[test]
+    fn build_manifest_with_identity_maps_mode_and_counts() {
+        let counts = BackupCounts {
+            item_count: 3,
+            text_count: 1,
+            image_count: 1,
+            files_count: 1,
+        };
+        let manifest = build_manifest_with_identity(
+            "EcoPaste",
+            "1.2.3",
+            Utc::now(),
+            BackupExportMode::Encrypted,
+            counts,
+            42,
+        )
+        .unwrap();
+
+        assert_eq!(manifest.app_name, "EcoPaste");
+        assert_eq!(manifest.app_version, "1.2.3");
+        assert_eq!(manifest.encryption, ManifestEncryption::Password);
+        assert_eq!(manifest.item_count, 3);
+        assert_eq!(manifest.text_count, 1);
+        assert_eq!(manifest.image_count, 1);
+        assert_eq!(manifest.files_count, 1);
+        assert_eq!(manifest.resource_bytes, 42);
+    }
+
+    /// 端到端（无 AppHandle）：`export_items_backup` 的三段装配——过滤库、
+    /// 资源子集物化、payload zip + container——在纯文件/内存环境下串起来，
+    /// 产出真实 `.ecopastebak`，再走导入端的识别 / 解包 / 校验路径读回来。
+    /// 证明「所选条目」备份能被现有导入链路无损消费。
+    #[tokio::test]
+    async fn items_export_payload_round_trips_through_import_reader() {
+        use crate::db::groups::insert_group;
+        use crate::db::items::{content_hash, insert_item};
+        use crate::db::models::ClipboardGroup;
+        use crate::db::test_support::memory_pool;
+        use chrono::DateTime;
+
+        let ts = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let pool = memory_pool().await;
+
+        insert_group(
+            &pool,
+            &ClipboardGroup {
+                id: "g1".to_owned(),
+                name: "G1".to_owned(),
+                icon: "i-lucide:folder".to_owned(),
+                is_hidden: false,
+                sort_order: 0,
+                created_at: ts,
+                updated_at: ts,
+            },
+        )
+        .await
+        .unwrap();
+
+        for id in ["t1", "t2"] {
+            let content = format!("round trip {id}");
+            let mut item = round_trip_item(id, "g1", &content, ts);
+            item.content_hash = content_hash(crate::db::models::ClipboardKind::Text, &content);
+            insert_item(&pool, &item).await.unwrap();
+        }
+
+        // Temp work dir mirrors what export_items_backup stages for the zip.
+        let work = tempdir().unwrap();
+        let items = build_filtered_db(
+            &pool,
+            &["t1".to_owned(), "t2".to_owned(), "nope".to_owned()],
+            &work.path().join("clipboard.db"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(items.len(), 2);
+
+        let resources = work.path().join("resources");
+        fs::create_dir_all(resources.join("clipboard-images/origin/ab")).unwrap();
+        fs::write(
+            resources.join("clipboard-images/origin/ab/abcd.png"),
+            b"png-bytes",
+        )
+        .unwrap();
+
+        let settings = work.path().join("settings.json");
+        fs::write(&settings, b"{\"locale\":\"zh-CN\"}").unwrap();
+
+        let counts = count_filtered_items(&items);
+        let manifest = build_manifest_with_identity(
+            "EcoPaste",
+            "test",
+            Utc::now(),
+            BackupExportMode::Plain,
+            counts,
+            9,
+        )
+        .unwrap();
+        let source_paths = BackupSourcePaths {
+            db_path: work.path().join("clipboard.db"),
+            resources_dir: resources.clone(),
+            settings_path: settings,
+        };
+
+        let payload = NamedTempFile::new().unwrap();
+        let target = work.path().join("items.ecopastebak");
+        write_payload_zip(&source_paths, payload.path(), &manifest, &target).unwrap();
+        let _total_bytes =
+            write_container(&target, payload.path(), BackupExportMode::Plain, None).unwrap();
+
+        // Import side recognizes the container and the extracted payload passes
+        // the same validation gate real imports run.
+        assert_eq!(
+            inspect_backup_file(&target).unwrap(),
+            BackupContainerMode::Plain
+        );
+        let bytes = read_backup_payload(&target, None).unwrap();
+        let extracted = extract_payload_zip(&bytes).unwrap();
+        validate_extracted_payload(extracted.path()).unwrap();
+
+        let names = archive_file_names(&bytes);
+        assert!(names.contains(&"config/settings.json".to_owned()));
+        assert!(names.contains(&"db/clipboard.db".to_owned()));
+        assert!(names.contains(&"manifest.json".to_owned()));
+        assert!(names.contains(&"resources/clipboard-images/origin/ab/abcd.png".to_owned()));
+
+        // The filtered db inside the payload keeps only the selected rows.
+        let inner = open_backup_db(&extracted.path().join("db").join("clipboard.db"))
+            .await
+            .unwrap();
+        let inner_items: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM clipboard_items ORDER BY id")
+                .fetch_all(&inner)
+                .await
+                .unwrap();
+        assert_eq!(inner_items, vec!["t1".to_owned(), "t2".to_owned()]);
+        inner.close().await;
+    }
+
+    /// 单测用最小条目骨架（batch export round-trip 专属，字段全默认值）。
+    fn round_trip_item(
+        id: &str,
+        group_id: &str,
+        content: &str,
+        ts: DateTime<Utc>,
+    ) -> crate::db::models::ClipboardItem {
+        crate::db::models::ClipboardItem {
+            id: id.to_owned(),
+            kind: crate::db::models::ClipboardKind::Text,
+            sub_kind: None,
+            group_id: Some(group_id.to_owned()),
+            source_app_id: None,
+            content: content.to_owned(),
+            content_hash: String::new(),
+            search_text: Some(content.to_owned()),
+            summary: None,
+            file_types: None,
+            size: None,
+            width: None,
+            height: None,
+            use_count: 1,
+            is_favorite: false,
+            is_pinned: false,
+            is_sensitive: false,
+            platform: crate::db::models::Platform::Macos,
+            note: None,
+            created_at: ts,
+            updated_at: ts,
+            source_app_name: None,
+            source_app_icon_file: None,
+            source_app_icon_path: None,
+            image_thumbnail_path: None,
+            file_entries: None,
+            files_preview_kind: None,
+            available_actions: Vec::new(),
+            color_preview: None,
+            display_created_at: String::new(),
+        }
+    }
+
+    /// 列出 zip payload 内全部条目名，供断言备份内容完整性。
+    fn archive_file_names(payload: &[u8]) -> Vec<String> {
+        let cursor = Cursor::new(payload.to_vec());
+        let mut archive = ZipArchive::new(cursor).unwrap();
+        (0..archive.len())
+            .map(|index| archive.by_index(index).unwrap().name().to_owned())
+            .collect()
     }
 }

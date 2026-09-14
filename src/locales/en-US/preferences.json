@@ -23,7 +23,8 @@
       "plainConfirmRequired": "Confirm the plain backup risk",
       "plainWarning": "Anyone with the file can read the backup contents directly.",
       "plainWarningTitle": "Plain backups are not password protected",
-      "title": "Export EcoPaste Backup"
+      "title": "Export EcoPaste Backup",
+      "titleItems": "Export Selected Records"
     },
     "fileFilter": "EcoPaste Backup",
     "import": {

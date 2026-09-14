@@ -1,4 +1,16 @@
 {
+  "batchToolbar": {
+    "clearSelection": "Clear selection",
+    "delete": "Batch delete",
+    "export": "Export selected",
+    "favorite": "Batch favorite",
+    "loadingGroups": "Loading groups…",
+    "moveGroup": "Move to group",
+    "noGroups": "No groups yet",
+    "pinned": "Batch pin",
+    "removeFromGroup": "Remove from group",
+    "selected": "{{count}} selected"
+  },
   "edit": {
     "emptyHint": "Content cannot be empty",
     "placeholder": "Enter the new text content...",

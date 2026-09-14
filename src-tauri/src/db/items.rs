@@ -206,6 +206,34 @@ pub async fn find_item_for_list_by_id(
     Ok(item)
 }
 
+/// 按 `id` 列表批量取完整记录（不裁剪 `content`），分块防超 SQLite 绑定参数上限；
+/// 不存在的 id 静默跳过。批量备份导出用，取到的行随后原样写入过滤库。
+pub async fn list_items_by_ids(pool: &SqlitePool, ids: &[String]) -> Result<Vec<ClipboardItem>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut items = Vec::with_capacity(ids.len());
+    for chunk in ids.chunks(BATCH_UPDATE_CHUNK) {
+        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(SELECT_ITEM);
+        qb.push(" WHERE id IN (");
+        let mut separated = qb.separated(", ");
+        for id in chunk {
+            separated.push_bind(id);
+        }
+        qb.push(")");
+
+        let rows = qb
+            .build_query_as::<ClipboardItem>()
+            .fetch_all(pool)
+            .await
+            .context("failed to list clipboard items by ids")?;
+        items.extend(rows);
+    }
+
+    Ok(items)
+}
+
 /// 翻转 `is_favorite`（收藏 / 取消收藏），返回翻转后的新状态。
 pub async fn toggle_item_favorite(pool: &SqlitePool, id: &str) -> Result<bool> {
     let new_value: bool = sqlx::query_scalar(
@@ -309,6 +337,90 @@ pub async fn update_item_group(pool: &SqlitePool, id: &str, group_id: Option<&st
         .await
         .context("failed to update clipboard item group")?;
     Ok(())
+}
+
+/// 批量元数据 UPDATE 的单批 id 数上限：SQLite 绑定参数上限 32766，
+/// 与备份 merge 的 `MERGE_INSERT_CHUNK` 同值。
+const BATCH_UPDATE_CHUNK: usize = 500;
+
+/// 批量设置收藏态（幂等）。纯元数据 UPDATE：不刷新 `updated_at`、不触发 FTS 重建
+///（0003 触发器 WHEN 条件限定 search_text/note 变化）。返回受影响行数。
+pub async fn set_items_favorite(pool: &SqlitePool, ids: &[String], favorite: bool) -> Result<u64> {
+    batch_update_flag(pool, ids, "is_favorite", favorite).await
+}
+
+/// 批量设置置顶态（幂等），语义同 [`set_items_favorite`]。返回受影响行数。
+pub async fn set_items_pinned(pool: &SqlitePool, ids: &[String], pinned: bool) -> Result<u64> {
+    batch_update_flag(pool, ids, "is_pinned", pinned).await
+}
+
+/// 批量设置布尔标记列（`is_favorite` / `is_pinned`），分块执行。
+async fn batch_update_flag(
+    pool: &SqlitePool,
+    ids: &[String],
+    column: &str,
+    value: bool,
+) -> Result<u64> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut affected = 0_u64;
+    for chunk in ids.chunks(BATCH_UPDATE_CHUNK) {
+        let mut qb: QueryBuilder<Sqlite> =
+            QueryBuilder::new(format!("UPDATE clipboard_items SET {column} = "));
+        qb.push_bind(value);
+        qb.push(" WHERE id IN (");
+        let mut separated = qb.separated(", ");
+        for id in chunk {
+            separated.push_bind(id);
+        }
+        qb.push(")");
+
+        let result = qb
+            .build()
+            .execute(pool)
+            .await
+            .with_context(|| format!("failed to batch set {column}"))?;
+        affected += result.rows_affected();
+    }
+
+    Ok(affected)
+}
+
+/// 批量移动到分组；`group_id = None` 表示移出分组。不刷新 `updated_at`。
+/// 分组 id 不做外键校验（依赖 `group_id` 无 FK 约束的现有语义，与单条
+/// [`update_item_group`] 一致）。返回受影响行数。
+pub async fn move_items_to_group(
+    pool: &SqlitePool,
+    ids: &[String],
+    group_id: Option<&str>,
+) -> Result<u64> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut affected = 0_u64;
+    for chunk in ids.chunks(BATCH_UPDATE_CHUNK) {
+        let mut qb: QueryBuilder<Sqlite> =
+            QueryBuilder::new("UPDATE clipboard_items SET group_id = ");
+        qb.push_bind(group_id);
+        qb.push(" WHERE id IN (");
+        let mut separated = qb.separated(", ");
+        for id in chunk {
+            separated.push_bind(id);
+        }
+        qb.push(")");
+
+        let result = qb
+            .build()
+            .execute(pool)
+            .await
+            .context("failed to batch move items to group")?;
+        affected += result.rows_affected();
+    }
+
+    Ok(affected)
 }
 
 /// `use_count + 1` 并刷新 `updated_at`（命中去重时复用）。
@@ -946,6 +1058,105 @@ mod tests {
         let moved = find_item_by_id(&pool, "item").await.unwrap().unwrap();
         assert_eq!(moved.group_id, Some("g1".to_owned()));
         assert_eq!(moved.updated_at, original_updated_at);
+    }
+
+    /// 批量收藏 / 置顶 / 移分组：逐条状态正确、updated_at 不刷新、
+    /// 元数据 UPDATE 不触发 FTS 重建、移分组 None 出组、不存在的 id 静默跳过。
+    #[tokio::test]
+    async fn batch_metadata_updates_keep_state_and_fts_stable() {
+        let pool = memory_pool().await;
+        for id in ["b1", "b2", "b3"] {
+            let mut item = sample_item(id);
+            item.content = format!("batch body {id}");
+            item.search_text = Some(format!("batch body {id}"));
+            insert_item(&pool, &item).await.unwrap();
+        }
+
+        let affected = set_items_favorite(&pool, &["b1".into(), "b2".into()], true)
+            .await
+            .unwrap();
+        assert_eq!(affected, 2);
+        for id in ["b1", "b2"] {
+            let row = find_item_by_id(&pool, id).await.unwrap().unwrap();
+            assert!(row.is_favorite);
+            // 元数据 UPDATE 不刷新 updated_at。
+            assert_eq!(row.updated_at, row.created_at);
+        }
+        let untouched = find_item_by_id(&pool, "b3").await.unwrap().unwrap();
+        assert!(!untouched.is_favorite);
+
+        let pinned = set_items_pinned(&pool, &["b3".into()], true).await.unwrap();
+        assert_eq!(pinned, 1);
+
+        let group = ClipboardGroup {
+            id: "bg".to_owned(),
+            name: "BG".to_owned(),
+            icon: "i-lets-icons:folder".to_owned(),
+            is_hidden: false,
+            sort_order: 0,
+            created_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            updated_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+        };
+        insert_group(&pool, &group).await.unwrap();
+
+        let moved = move_items_to_group(
+            &pool,
+            &["b1".into(), "b2".into(), "missing".into()],
+            Some("bg"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(moved, 2, "missing id 被静默跳过");
+        let row = find_item_by_id(&pool, "b1").await.unwrap().unwrap();
+        assert_eq!(row.group_id, Some("bg".to_owned()));
+
+        // 移出分组。
+        let out = move_items_to_group(&pool, &["b1".into()], None)
+            .await
+            .unwrap();
+        assert_eq!(out, 1);
+        let row = find_item_by_id(&pool, "b1").await.unwrap().unwrap();
+        assert_eq!(row.group_id, None);
+
+        // 批量元数据 UPDATE 后 FTS 仍命中原关键词（索引未破坏）。
+        let search = ClipboardItemQuery {
+            keyword: Some("batch".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(query_items(&pool, &search).await.unwrap().len(), 3);
+
+        // 空列表 no-op。
+        assert_eq!(
+            set_items_favorite(&pool, &[], true).await.unwrap(),
+            0,
+            "empty ids is no-op"
+        );
+    }
+
+    /// 按 id 批量取完整记录：命中所有存在 id、跳过缺失 id、保持全字段。
+    #[tokio::test]
+    async fn list_items_by_ids_returns_full_rows_and_skips_missing() {
+        let pool = memory_pool().await;
+        for id in ["q1", "q2"] {
+            let mut item = sample_item(id);
+            item.content = format!("full body {id}");
+            item.search_text = Some(format!("full body {id}"));
+            insert_item(&pool, &item).await.unwrap();
+        }
+
+        let rows = list_items_by_ids(&pool, &["q2".into(), "missing".into(), "q1".into()])
+            .await
+            .unwrap();
+        let mut ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["q1", "q2"]);
+
+        // 完整记录不裁剪 content（批量导出要原样写入过滤库）。
+        let q1 = rows.iter().find(|row| row.id == "q1").unwrap();
+        assert_eq!(q1.content, "full body q1");
+
+        // 空列表 no-op。
+        assert!(list_items_by_ids(&pool, &[]).await.unwrap().is_empty());
     }
 
     #[tokio::test]
