@@ -16,6 +16,7 @@ import { SponsorQrControl } from "./AboutControls";
 import ActionControl from "./ActionControl";
 import CaptureOrderControl from "./CaptureOrderControl";
 import ClipboardGroupSelectControl from "./ClipboardGroupSelectControl";
+import DensityPresetControl from "./DensityPresetControl";
 import NumberControl from "./NumberControl";
 import PermissionControl from "./PermissionControl";
 import RetentionControl, { resolveRetentionValue } from "./RetentionControl";
@@ -65,6 +66,14 @@ const PreferenceSettingControl: FC<PreferenceSettingControlProps> = (props) => {
   switch (setting.control.type) {
     case "sponsorQr":
       return <SponsorQrControl setting={setting} />;
+    case "densityPreset":
+      return (
+        <DensityPresetControl
+          disabled={disabled}
+          onChange={onChange}
+          settings={settings}
+        />
+      );
     case "switch":
       return (
         <SwitchControl

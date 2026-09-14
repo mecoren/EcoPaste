@@ -44,6 +44,7 @@ export type PreferenceControl =
       kind: "accessibility" | "fullDiskAccess" | "runAsAdministrator";
     }
   | { type: "segmented"; options: PreferenceOption[] }
+  | { type: "densityPreset" }
   | { type: "select"; options: PreferenceOption[]; mode?: "multiple" }
   | { type: "clipboardGroupSelect" }
   | {

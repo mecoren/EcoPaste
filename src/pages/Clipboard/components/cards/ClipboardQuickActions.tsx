@@ -1,4 +1,5 @@
 import { useUnmount } from "ahooks";
+import { Dropdown } from "antd";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import type { FC, MouseEvent, SyntheticEvent } from "react";
 import { useRef, useState } from "react";
@@ -12,6 +13,9 @@ import {
 import type { ClipboardItem } from "@/types/clipboard";
 import type { ItemAction } from "@/types/settings";
 import { cn } from "@/utils/cn";
+
+/** 直接平铺展示的动作数上限，超出折叠进「…」菜单。 */
+const INLINE_ACTIONS_LIMIT = 3;
 
 interface ClipboardQuickActionsProps {
   item: ClipboardItem;
@@ -32,7 +36,9 @@ interface QuickActionButtonProps {
 }
 
 /**
- * 在卡片 meta 右侧展示时间，并在 hover 时替换为当前条目可执行的快捷动作。
+ * 卡片 meta 右侧：时间戳常驻（hover 时降为次级并收缩），快捷动作从其右侧
+ * 弹入——hover 期间时间信息不再消失。动作超过 [`INLINE_ACTIONS_LIMIT`] 个时
+ * 前 3 个平铺、其余折叠进「…」菜单。
  */
 const ClipboardQuickActions: FC<ClipboardQuickActionsProps> = (props) => {
   const { item, labels, onQuickAction, quickActions, visible } = props;
@@ -46,14 +52,16 @@ const ClipboardQuickActions: FC<ClipboardQuickActionsProps> = (props) => {
     duration: shouldReduceMotion ? 0 : 0.16,
     ease: "easeOut",
   } as const;
+  const inlineActions = availableActions.slice(0, INLINE_ACTIONS_LIMIT);
+  const overflowActions = availableActions.slice(INLINE_ACTIONS_LIMIT);
 
   return (
-    <div className="grid h-6 shrink-0 items-center justify-items-end overflow-hidden">
+    <div className="flex h-6 min-w-0 shrink-0 items-center justify-end gap-1">
       <span
         className={cn(
-          "col-start-1 row-start-1 transition-all duration-150 ease-out motion-reduce:transition-none",
+          "min-w-0 truncate transition-all duration-150 ease-out motion-reduce:transition-none",
           {
-            "-translate-x-1 opacity-0": actionsVisible,
+            "opacity-40": actionsVisible,
           },
         )}
       >
@@ -64,14 +72,14 @@ const ClipboardQuickActions: FC<ClipboardQuickActionsProps> = (props) => {
         <div
           aria-hidden={!actionsVisible}
           className={cn(
-            "pointer-events-none col-start-1 row-start-1 flex translate-x-1 items-center gap-0.5 opacity-0 transition-all duration-150 ease-out motion-reduce:transition-none",
+            "pointer-events-none flex items-center gap-0.5 opacity-0 transition-all duration-150 ease-out motion-reduce:transition-none",
             {
-              "pointer-events-auto translate-x-0 opacity-100": actionsVisible,
+              "pointer-events-auto opacity-100": actionsVisible,
             },
           )}
         >
           <AnimatePresence initial={false} mode="popLayout">
-            {availableActions.map((action) => {
+            {inlineActions.map((action) => {
               return (
                 <motion.span
                   animate={{ opacity: 1, scale: 1, width: "1.25rem", x: 0 }}
@@ -100,9 +108,82 @@ const ClipboardQuickActions: FC<ClipboardQuickActionsProps> = (props) => {
               );
             })}
           </AnimatePresence>
+
+          {overflowActions.length > 0 ? (
+            <OverflowActionsMenu
+              actions={overflowActions}
+              isFavorite={item.isFavorite}
+              isPinned={item.isPinned}
+              labels={labels}
+              onQuickAction={onQuickAction}
+              visible={actionsVisible}
+            />
+          ) : null}
         </div>
       ) : null}
     </div>
+  );
+};
+
+interface OverflowActionsMenuProps {
+  actions: ItemAction[];
+  isFavorite: boolean;
+  isPinned: boolean;
+  labels: ItemActionLabels;
+  onQuickAction: (action: ItemAction) => Promise<void> | void;
+  visible: boolean;
+}
+
+/**
+ * 折叠的溢出动作「…」菜单：antd Dropdown，菜单项复用动作的图标与文案。
+ */
+const OverflowActionsMenu: FC<OverflowActionsMenuProps> = (props) => {
+  const { actions, isFavorite, isPinned, labels, onQuickAction, visible } =
+    props;
+
+  const menuItems = actions.map((action) => {
+    const presentation = resolveItemActionPresentation(action, labels, {
+      isFavorite: action === "star" && isFavorite,
+      isPinned: action === "pinItem" && isPinned,
+    });
+
+    return {
+      icon: (
+        <i aria-hidden="true" className={cn(presentation.icon, "text-sm")} />
+      ),
+      key: action,
+      label: presentation.label,
+    };
+  });
+
+  return (
+    <Dropdown
+      menu={{
+        items: menuItems,
+        onClick: ({ key }) => {
+          onQuickAction(key as ItemAction);
+        },
+      }}
+      trigger={["click"]}
+    >
+      <button
+        aria-label={labels.more}
+        className={cn(
+          "flex size-5 items-center justify-center rounded-1.5 border-0 bg-transparent text-ant-secondary transition-colors hover:bg-ant-fill-tertiary hover:text-ant-text motion-reduce:transition-none",
+          { invisible: !visible },
+        )}
+        onClick={(event) => {
+          event.stopPropagation();
+        }}
+        onPointerDown={(event) => {
+          event.stopPropagation();
+        }}
+        tabIndex={visible ? 0 : -1}
+        type="button"
+      >
+        <i aria-hidden="true" className="i-lucide:ellipsis text-sm" />
+      </button>
+    </Dropdown>
   );
 };
 

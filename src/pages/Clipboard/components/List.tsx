@@ -34,6 +34,7 @@ import {
 } from "@/commands";
 import VirtuosoScroller, {
   type VirtuosoScrollerChildrenProps,
+  type VirtuosoScrollerRef,
 } from "@/components/VirtuosoScroller";
 import { TAURI_EVENT } from "@/constants/events";
 import { buildItemActionLabels } from "@/constants/itemActions";
@@ -109,7 +110,12 @@ const List: FC = () => {
   const [groupPickerOpen, setGroupPickerOpen] = useState(false);
   // 批量「导出所选」弹层开合（复用偏好页备份导出弹窗，携带所选 id）。
   const [batchExportOpen, setBatchExportOpen] = useState(false);
+  // 回顶按钮显隐（滚动超过一屏显示、回落半屏隐藏的滞回）。
+  const [showBackToTop, setShowBackToTop] = useState(false);
   const virtuosoRef = useRef<VirtuosoHandle>(null);
+  // Virtuoso 滚动容器元素与其滚动监听：回顶按钮的显隐判定挂在容器上。
+  const scrollerElementRef = useRef<HTMLElement | null>(null);
+  const backToTopScrollListenerRef = useRef<() => void>(() => {});
   const isAtTopRef = useRef(true);
   const itemElementMapRef = useRef(new Map<string, HTMLDivElement>());
   const closePreviewRef = useRef<(reason: string) => void>(() => {});
@@ -159,6 +165,7 @@ const List: FC = () => {
     loadRange,
     loadedInitial,
     loading,
+    loadingMore,
     patchItemById,
     reload,
     reloadCurrentRange,
@@ -1073,6 +1080,49 @@ const List: FC = () => {
   };
 
   /**
+   * 把 Virtuoso 滚动容器接入回顶按钮的显隐监听：ref 变化即解绑旧容器、
+   * 绑定新容器（loading spin 阶段 scroller 尚不存在，晚绑定）。
+   * 监听器闭包捕获的 setShowBackToTop 是 React 稳定引用，不随 render 失效。
+   */
+  const bindScrollerRef = (ref: VirtuosoScrollerRef) => {
+    const previous = scrollerElementRef.current;
+
+    if (previous && previous !== ref) {
+      previous.removeEventListener(
+        "scroll",
+        backToTopScrollListenerRef.current,
+      );
+    }
+
+    scrollerElementRef.current = ref instanceof HTMLElement ? ref : null;
+
+    if (ref instanceof HTMLElement) {
+      const listener = () => {
+        const scroller = ref;
+        const threshold = scroller.clientHeight;
+
+        setShowBackToTop((visible) => {
+          if (visible) {
+            return scroller.scrollTop > threshold / 2;
+          }
+
+          return scroller.scrollTop > threshold;
+        });
+      };
+
+      backToTopScrollListenerRef.current = listener;
+      ref.addEventListener("scroll", listener, { passive: true });
+    }
+  };
+
+  /**
+   * 平滑回顶：`atTopStateChange` 翻正后自动消费 pending 的顶部补刷。
+   */
+  const handleBackToTop = () => {
+    virtuosoRef.current?.scrollToIndex({ behavior: "smooth", index: 0 });
+  };
+
+  /**
    * 自动刷新请求只在顶部执行；离开顶部时保留 pending，等待回顶后消费。
    */
   function requestReloadAtTop() {
@@ -1132,6 +1182,17 @@ const List: FC = () => {
     >
       <VirtuosoScroller>{renderVirtuoso}</VirtuosoScroller>
 
+      {showBackToTop ? (
+        <button
+          aria-label={t("backToTop")}
+          className="absolute right-3 bottom-15 z-15 flex size-8 items-center justify-center rounded-full border border-ant-border-secondary bg-ant-container text-ant-secondary shadow-md transition-colors hover:text-ant-text motion-reduce:transition-none"
+          onClick={handleBackToTop}
+          type="button"
+        >
+          <i aria-hidden="true" className="i-lucide:arrow-up-to-line" />
+        </button>
+      ) : null}
+
       <BatchActionToolbar
         onBatchDelete={handleBatchDelete}
         onBatchExport={() => {
@@ -1187,12 +1248,19 @@ const List: FC = () => {
     return (
       <Virtuoso
         atTopStateChange={handleAtTopStateChange}
-        components={{ TopItemList }}
+        components={
+          loadingMore
+            ? { Footer: LoadingMoreFooter, TopItemList }
+            : { TopItemList }
+        }
         computeItemKey={computeItemKey}
         itemContent={renderItemContent}
         rangeChanged={handleRangeChanged}
         ref={virtuosoRef}
-        scrollerRef={scrollerRef}
+        scrollerRef={(ref) => {
+          bindScrollerRef(ref);
+          scrollerRef(ref);
+        }}
         topItemCount={topItemCount}
         totalCount={total}
       />
@@ -1745,6 +1813,27 @@ const TopItemList: FC<TopItemListProps> = (props) => {
   return (
     <div className="relative z-10 bg-ant-container" style={style}>
       {children}
+    </div>
+  );
+};
+
+/**
+ * 加载下一页时列表底部的骨架反馈条：复用 placeholder 卡片的骨架视觉，
+ * 紧凑两行，避免与真实卡片混入后的跳动。
+ */
+const LoadingMoreFooter: FC = () => {
+  return (
+    <div aria-hidden="true" className="px-3 pt-3">
+      <div className="mb-3 min-h-18 rounded-2 border border-ant-border-secondary bg-ant-fill-quaternary p-2">
+        <div className="flex items-center gap-1 text-ant-secondary text-xs">
+          <span className="size-4 rounded-1 bg-ant-fill-secondary" />
+          <span className="h-3 w-16 rounded-1 bg-ant-fill-secondary" />
+        </div>
+        <div className="mt-3 flex flex-col gap-2">
+          <span className="h-3 w-9/12 rounded-1 bg-ant-fill-secondary" />
+          <span className="h-3 w-6/12 rounded-1 bg-ant-fill-secondary" />
+        </div>
+      </div>
     </div>
   );
 };

@@ -188,6 +188,13 @@
         }
       },
       "appearance": {
+        "densityPreset": {
+          "comfortable": "Comfortable",
+          "compact": "Compact",
+          "description": "Switch list density in one click; the preset highlight clears once you tweak individual parameters.",
+          "standard": "Standard",
+          "title": "Density Preset"
+        },
         "fileMaxCount": {
           "description": "Limit how many files are shown in each file record card.",
           "title": "Maximum Files Shown"

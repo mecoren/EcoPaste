@@ -1,4 +1,5 @@
 {
+  "backToTop": "Back to top",
   "batchToolbar": {
     "clearSelection": "Clear selection",
     "delete": "Batch delete",
@@ -91,6 +92,7 @@
     "copyPlain": "Copy as Plain Text",
     "copySuccess": "Copied",
     "delete": "Delete",
+    "moreActions": "More actions",
     "note": "Note",
     "openLink": "Open Link",
     "paste": "Paste",

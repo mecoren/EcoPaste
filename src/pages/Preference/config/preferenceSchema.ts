@@ -565,6 +565,11 @@ export const preferenceTabs: PreferenceTab[] = [
             },
           },
           {
+            control: { type: "densityPreset" },
+            id: "appearance.densityPreset",
+            keywords: ["density", "compact", "comfortable", "preset"],
+          },
+          {
             control: { max: 5, min: 1, suffixKey: "lines", type: "number" },
             id: "appearance.textMaxLines",
             keywords: ["density", "text", "line", "compact"],

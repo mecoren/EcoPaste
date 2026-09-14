@@ -188,6 +188,13 @@
         }
       },
       "appearance": {
+        "densityPreset": {
+          "comfortable": "舒适",
+          "compact": "紧凑",
+          "description": "一键切换列表显示密度；手动调整单项参数后预设高亮自动取消。",
+          "standard": "标准",
+          "title": "显示密度预设"
+        },
         "fileMaxCount": {
           "description": "限制文件记录在列表卡片中最多显示的文件数量。",
           "title": "文件最多显示数量"
