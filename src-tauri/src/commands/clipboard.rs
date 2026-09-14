@@ -274,7 +274,10 @@ pub struct ClipboardPreviewPayload {
     pub updated_at: DateTime<Utc>,
     /// 预览窗口展示用纯文本。HTML / RTF 条目返回 `search_text`，不返回富文本源。
     pub text: Option<String>,
+    /// 预览面板渲染图：960px 预览档（懒生成），避免面板解码整张原图。
     pub image_path: Option<String>,
+    /// 原图绝对路径：仅灯箱放大使用（P3-1），面板渲染不读。
+    pub image_origin_path: Option<String>,
     pub image_width: Option<i64>,
     pub image_height: Option<i64>,
     pub size: Option<i64>,
@@ -1071,6 +1074,7 @@ async fn build_clipboard_preview_payload(
 ) -> Result<ClipboardPreviewPayload> {
     let mut text = None;
     let mut image_path = None;
+    let mut image_origin_path = None;
     let mut image_exists = false;
     let mut files = Vec::new();
     let mut total_files = 0;
@@ -1094,6 +1098,11 @@ async fn build_clipboard_preview_payload(
                     })??;
             image_exists = path.exists();
             image_path = Some(path_to_string(&path, "image path")?);
+            // 原图路径是纯推导（分片目录从文件名计算），无额外 IO；灯箱按需解码。
+            let origin = image_store.origin_path(&item.content);
+            if origin.exists() {
+                image_origin_path = Some(path_to_string(&origin, "image origin path")?);
+            }
         }
         ClipboardKind::Files => {
             total_files = count_file_paths(&item.content);
@@ -1113,6 +1122,7 @@ async fn build_clipboard_preview_payload(
         updated_at: item.updated_at,
         text,
         image_path,
+        image_origin_path,
         image_width: item.width,
         image_height: item.height,
         size: item.size,

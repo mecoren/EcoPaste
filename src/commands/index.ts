@@ -132,7 +132,9 @@ export interface ClipboardPreviewPayload {
   subKind: ClipboardSubKind | null;
   updatedAt: string;
   text: string | null;
+  /** 预览面板渲染图（960px 预览档路径）；仅灯箱放大用 `imageOriginPath` 原图。 */
   imagePath: string | null;
+  imageOriginPath: string | null;
   imageWidth: number | null;
   imageHeight: number | null;
   size: number | null;

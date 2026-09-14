@@ -1,7 +1,8 @@
-import { Empty } from "antd";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { Image as AntImage, Empty } from "antd";
 import type { TFunction } from "i18next";
 import type { FC } from "react";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Virtuoso } from "react-virtuoso";
 import type {
@@ -147,13 +148,19 @@ const TextViewer: FC<PayloadViewerProps> = (props) => {
 };
 
 /**
- * 图片预览：使用原图路径渲染，缺失时降级为空状态。
+ * 图片预览：面板用 960px 预览档渲染；点击展开灯箱（antd Image preview 体系，
+ * 自带滚轮/按钮缩放、拖拽平移、Esc 关闭），灯箱才加载原图——此时才付出整图
+ * 解码成本，单次、用户主动触发。原图缺失时灯箱退回预览档。
  */
 const ImageViewer: FC<PayloadViewerProps> = (props) => {
   const { payload } = props;
   const { t } = useTranslation("preview");
+  const [lightboxOpen, setLightboxOpen] = useState(false);
   const imageWidth = payload.imageWidth ?? void 0;
   const imageHeight = payload.imageHeight ?? void 0;
+  const lightboxSrc = payload.imageOriginPath ?? payload.imagePath;
+  // antd Image 不走 AssetImage 的 convertFileSrc 封装，这里手动转。
+  const lightboxUrl = lightboxSrc ? convertFileSrc(lightboxSrc) : void 0;
 
   if (!payload.imagePath || !payload.imageExists) {
     return (
@@ -166,15 +173,40 @@ const ImageViewer: FC<PayloadViewerProps> = (props) => {
     );
   }
 
+  /**
+   * 点击图片展开灯箱；button 原生 Enter / Space 同效（预览窗 focusable=false，
+   * 键盘路径仅主窗口 keydown 重定向场景可达，鼠标点击是主路径）。
+   */
+  const openLightbox = () => {
+    setLightboxOpen(true);
+  };
+
   return (
     <div className="flex h-full min-h-0 items-center justify-center p-4">
-      <AssetImage
+      {/* AssetImage 自身 pointer-events-none（防 hover 干扰），点击目标放外层。 */}
+      <button className="cursor-zoom-in" onClick={openLightbox} type="button">
+        <AssetImage
+          alt={t("image.alt")}
+          className="h-auto max-h-full max-w-full object-contain"
+          draggable={false}
+          height={imageHeight}
+          src={payload.imagePath}
+          width={imageWidth}
+        />
+      </button>
+
+      {/* 隐藏承载节点：只为 antd 灯箱提供原图 src 与受控开关，面板内不渲染。 */}
+      <AntImage
         alt={t("image.alt")}
-        className="h-auto max-h-full max-w-full object-contain"
-        draggable={false}
-        height={imageHeight}
-        src={payload.imagePath}
-        width={imageWidth}
+        hidden
+        preview={{
+          onOpenChange: (open) => {
+            setLightboxOpen(open);
+          },
+          open: lightboxOpen,
+        }}
+        src={lightboxUrl}
+        style={{ display: "none" }}
       />
     </div>
   );
