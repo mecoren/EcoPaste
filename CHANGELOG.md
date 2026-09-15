@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.2.5](https://github.com/mecoren/EcoPaste/compare/v1.2.4...v1.2.5) (2026-09-15)
+
+### ✨ Features
+
+* make the clipboard hover preview fully interactive: scroll long content, drag-select text and copy just the selected fragment via the floating or header button, and preview single-image files in a lightbox
+
+### 🐛 Bug Fixes
+
+* clicking inside the interactive preview panel no longer dismisses the preview (the main window blur from focusing the overlay was closing it)
+
 ## [1.2.4](https://github.com/mecoren/EcoPaste/compare/v1.2.3...v1.2.4) (2026-09-15)
 
 ### ✨ Features
