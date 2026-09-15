@@ -28,7 +28,9 @@ export default defineConfig(async () => ({
           protocol: "ws",
         }
       : undefined,
-    host: host || false,
+    // Node 17+ 会把 localhost 解析为 IPv6 [::1]，而 Tauri 探测走 IPv4，
+    // 显式绑 127.0.0.1 避免两端协议栈不一致导致 dev server 探测失败。
+    host: host || "127.0.0.1",
     port: 1420,
     strictPort: true,
     watch: {
