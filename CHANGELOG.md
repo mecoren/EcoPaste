@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.2.2](https://github.com/mecoren/EcoPaste/compare/v1.2.1...v1.2.2) (2026-09-15)
+
+### 🐛 Bug Fixes
+
+* pin clipboard timestamp to top-right until hover ([3084e8a](https://github.com/mecoren/EcoPaste/commit/3084e8a))
+
 ## [1.2.1](https://github.com/mecoren/EcoPaste/compare/v1.2.0...v1.2.1) (2026-09-15)
 
 ### ✨ Features

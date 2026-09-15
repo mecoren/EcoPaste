@@ -1,5 +1,11 @@
 # 更新日志
 
+## [1.2.2](https://github.com/mecoren/EcoPaste/compare/v1.2.1...v1.2.2) (2026-09-15)
+
+### 🐛 问题修复
+
+* 剪贴板卡片时间戳固定在右上角，鼠标悬浮时才被快捷按钮顶开 ([3084e8a](https://github.com/mecoren/EcoPaste/commit/3084e8a))
+
 ## [1.2.1](https://github.com/mecoren/EcoPaste/compare/v1.2.0...v1.2.1) (2026-09-15)
 
 ### ✨ 新功能
