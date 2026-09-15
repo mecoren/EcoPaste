@@ -45,12 +45,14 @@ import type {
 } from "@/types/clipboard";
 import { SOURCE_APP_NONE } from "@/types/clipboard";
 import { cn } from "@/utils/cn";
+import { findEditableElement, hasOpenDialog } from "@/utils/dom";
 import { getModalApi } from "@/utils/feedback";
 
 type GroupModalMode = "create" | "edit";
 type MoreMenuAction = "manageGroups" | "newGroup";
 type GroupMenuAction = "delete" | "edit" | "hide";
 type MoreMenuGroupKey = `group:${string}`;
+type HorizontalGroupValue = ClipboardCategory | typeof SOURCE_APP_GROUP_VALUE;
 
 interface RangeGroupOption {
   labelKey: string;
@@ -111,6 +113,16 @@ const CATEGORY_GROUP_OPTIONS: CategoryGroupOption[] = [
   },
 ];
 
+/** 左右键环形移动的最后一个落点：来源应用分组（前三个落点是分类）。 */
+const SOURCE_APP_GROUP_VALUE = "sourceApp";
+
+const HORIZONTAL_GROUP_VALUES: readonly HorizontalGroupValue[] = [
+  ...CATEGORY_GROUP_OPTIONS.map((option) => {
+    return option.value;
+  }),
+  SOURCE_APP_GROUP_VALUE,
+];
+
 const GROUP_MENU_ACTION = {
   DELETE: "delete",
   EDIT: "edit",
@@ -162,6 +174,8 @@ const Group: FC = () => {
   const customGroupAnchorRef = useRef<HTMLSpanElement>(null);
   const contextGroupRef = useRef<ClipboardGroupRecord | null>(null);
   const deleteGroupRef = useRef<ClipboardGroupRecord | null>(null);
+  // 左右键光标落点：与筛选状态解耦，弹层关闭、分类被其它入口清空后仍从原位置继续移动。
+  const horizontalGroupCursorRef = useRef<HorizontalGroupValue | null>(null);
 
   const visibleCustomGroups = customGroups.filter((record) => {
     return !record.isHidden;
@@ -274,8 +288,13 @@ const Group: FC = () => {
   /**
    * 来源应用下拉开合受控：点击外部 / 选中行后由这里统一收口关闭，
    * 关闭即销毁弹层（destroyOnHidden），搜索词与高亮自然重置。
+   * 打开时同步左右键光标，鼠标点击后继续按方向键即可从来源应用往右走。
    */
   const handleSourceAppOpenChange = (open: boolean) => {
+    if (open) {
+      horizontalGroupCursorRef.current = SOURCE_APP_GROUP_VALUE;
+    }
+
     setSourceAppPopupOpen(open);
   };
 
@@ -287,7 +306,7 @@ const Group: FC = () => {
   };
 
   /**
-   * 点击分组按钮时根据 data 属性切换筛选。
+   * 点击分组按钮时根据 data 属性切换筛选，并同步左右键光标落点。
    */
   const handleGroupClick = (event: MouseEvent<HTMLButtonElement>) => {
     const type = event.currentTarget.dataset.type;
@@ -305,6 +324,7 @@ const Group: FC = () => {
     }
 
     if (type === "category" && isCategoryGroup(value)) {
+      horizontalGroupCursorRef.current = value;
       toggleCategory(value);
     }
   };
@@ -325,9 +345,14 @@ const Group: FC = () => {
   };
 
   /**
-   * 处理分组栏快捷键：Cmd/Ctrl+Q 切换范围，左右键切分类，Tab / Shift+Tab 仅在可见自定义分组间循环。
+   * 处理分组栏快捷键：Cmd/Ctrl+Q 切换范围，左右键在分类与来源应用之间移动，
+   * Tab / Shift+Tab 仅在可见自定义分组间循环。
+   * 弹窗打开时整体让位（键盘语义归弹窗）；左右键在输入状态下让位给光标移动，
+   * 判定见 `shouldUseNativeHorizontalNavigation`。
    */
   const handleKeyDown = (event: KeyboardEvent) => {
+    if (hasOpenDialog()) return;
+
     const eventModifierPressed = event.metaKey || event.ctrlKey;
 
     if (eventModifierPressed && event.key.toLowerCase() === "q") {
@@ -342,7 +367,7 @@ const Group: FC = () => {
       !shouldUseNativeHorizontalNavigation(event)
     ) {
       event.preventDefault();
-      selectAdjacentCategory(event.key === "ArrowLeft" ? -1 : 1);
+      selectAdjacentHorizontalGroup(event.key === "ArrowLeft" ? -1 : 1);
 
       return;
     }
@@ -373,21 +398,45 @@ const Group: FC = () => {
   };
 
   /**
-   * 按方向键在固定分类序列内循环；未选分类时从方向对应的端点进入。
+   * 左右键光标当前位置；光标尚未落点（从未移动过）时返回 -1，交给方向决定入口。
    */
-  const selectAdjacentCategory = (direction: -1 | 1) => {
-    const options = CATEGORY_GROUP_OPTIONS.map((option) => {
-      return option.value;
-    });
-    const currentCategory = clipboardViewState.category;
-    const current = currentCategory ? options.indexOf(currentCategory) : -1;
-    const startIndex = direction === 1 ? -1 : options.length;
-    const nextIndex =
-      (current === -1 ? startIndex + direction : current + direction) %
-      options.length;
-    const normalizedIndex = (nextIndex + options.length) % options.length;
+  const resolveHorizontalGroupIndex = () => {
+    const current = horizontalGroupCursorRef.current;
+    if (!current) return -1;
 
-    clipboardViewState.category = options[normalizedIndex];
+    return HORIZONTAL_GROUP_VALUES.indexOf(current);
+  };
+
+  /**
+   * 应用左右键落点：来源应用展开下拉并聚焦弹层搜索框（弹层挂载即聚焦），
+   * 分类写入筛选并收起下拉。
+   */
+  const applyHorizontalGroup = (value: HorizontalGroupValue) => {
+    horizontalGroupCursorRef.current = value;
+
+    if (value === SOURCE_APP_GROUP_VALUE) {
+      setSourceAppPopupOpen(true);
+
+      return;
+    }
+
+    setSourceAppPopupOpen(false);
+    clipboardViewState.category = value;
+  };
+
+  /**
+   * 按左右键在「文本 / 图片 / 文件 / 来源应用」之间环形移动；
+   * 光标不在任何落点时从方向对应的端点进入（→ 从文本，← 从来源应用）。
+   */
+  const selectAdjacentHorizontalGroup = (direction: -1 | 1) => {
+    const values = HORIZONTAL_GROUP_VALUES;
+    const currentIndex = resolveHorizontalGroupIndex();
+    const startIndex = direction === 1 ? -1 : values.length;
+    const nextIndex =
+      currentIndex === -1 ? startIndex + direction : currentIndex + direction;
+    const normalizedIndex = (nextIndex + values.length) % values.length;
+
+    applyHorizontalGroup(values[normalizedIndex]);
   };
 
   /**
@@ -667,6 +716,9 @@ const Group: FC = () => {
       sourceAppId === SOURCE_APP_NONE
         ? t("clipboard:groups.sourceAppNone")
         : (selectedApp?.name ?? t("clipboard:groups.sourceApp"));
+    // 主色高亮只表示筛选已生效；展开态是次级激活态，跟着弹层开合，关闭后不留假选中。
+    const selected = sourceAppId !== null;
+    const expanded = sourceAppPopupOpen && !selected;
 
     const renderSourceAppPopup = () => {
       return (
@@ -691,9 +743,10 @@ const Group: FC = () => {
       >
         <button
           className={cn(GROUP_ICON_BUTTON_CLASS, {
-            "bg-ant-primary text-ant-light-solid": sourceAppId !== null,
+            "bg-ant-fill-tertiary text-ant-primary": expanded,
+            "bg-ant-primary text-ant-light-solid": selected,
             "text-ant-secondary hover:bg-ant-fill-tertiary":
-              sourceAppId === null,
+              !selected && !expanded,
           })}
           type="button"
         >
@@ -1346,15 +1399,16 @@ function selectAdjacentCustomGroup(
 
 /**
  * 判断左右键是否应交给输入控件原生光标导航。
+ *
+ * 输入状态优先于分组导航：事件来自可编辑控件，或焦点仍停在可编辑控件上时，
+ * 左右键只用于移动光标，不在分类与来源应用之间移动分组。
+ * 额外查 `document.activeElement`：Rust 低级钩子回灌的合成事件没有 target，
+ * 只看 target 会把「焦点在搜索框里按左右键」误判成分组导航。
  */
 function shouldUseNativeHorizontalNavigation(event: KeyboardEvent) {
-  const target = event.target;
-  if (!(target instanceof HTMLElement)) return false;
+  if (findEditableElement(event.target)) return true;
 
-  const tagName = target.tagName.toLowerCase();
-  if (target.isContentEditable) return true;
-
-  return tagName === "input" || tagName === "textarea";
+  return findEditableElement(document.activeElement) !== null;
 }
 
 /**

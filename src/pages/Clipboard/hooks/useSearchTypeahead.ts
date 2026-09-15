@@ -6,7 +6,7 @@ import { searchTypingAck } from "@/commands";
 import { TAURI_EVENT } from "@/constants/events";
 import { prepareClipboardWindowEditableFocus } from "@/hooks/useClipboardWindowEditableFocus";
 import { useTauriListen } from "@/hooks/useTauriListen";
-import { findEditableElement } from "@/utils/dom";
+import { findEditableElement, hasOpenDialog } from "@/utils/dom";
 
 interface SearchTypeaheadOptions {
   /** 搜索框 ref；type-ahead 把焦点送回这里。 */
@@ -80,11 +80,4 @@ function shouldSteerToSearch(event: KeyboardEvent) {
   if (hasOpenDialog()) return false;
 
   return true;
-}
-
-/**
- * 判断当前是否有 antd Modal / 类弹窗打开。
- */
-function hasOpenDialog() {
-  return document.querySelector('[role="dialog"]') !== null;
 }

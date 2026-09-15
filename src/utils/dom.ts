@@ -32,3 +32,10 @@ export const isEditableElement = (element: HTMLElement) => {
 
   return tagName === "input" || tagName === "textarea";
 };
+
+/**
+ * 判断当前是否有 antd Modal / 类弹窗打开；弹窗打开期间键盘语义归弹窗所有。
+ */
+export const hasOpenDialog = () => {
+  return document.querySelector('[role="dialog"]') !== null;
+};
