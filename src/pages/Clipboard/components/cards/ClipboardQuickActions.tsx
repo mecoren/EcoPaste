@@ -36,9 +36,9 @@ interface QuickActionButtonProps {
 }
 
 /**
- * 卡片 meta 右侧：时间戳常驻（hover 时降为次级并收缩），快捷动作从其右侧
- * 弹入——hover 期间时间信息不再消失。动作超过 [`INLINE_ACTIONS_LIMIT`] 个时
- * 前 3 个平铺、其余折叠进「…」菜单。
+ * 卡片 meta 右侧：未 hover 时快捷动作宽度归零且不带间距，时间戳贴在最右上角；
+ * hover 时动作从右侧弹入，把时间戳顶向左侧并降为次级透明度。
+ * 动作超过 [`INLINE_ACTIONS_LIMIT`] 个时前 3 个平铺、其余折叠进「…」菜单。
  */
 const ClipboardQuickActions: FC<ClipboardQuickActionsProps> = (props) => {
   const { item, labels, onQuickAction, quickActions, visible } = props;
@@ -56,7 +56,7 @@ const ClipboardQuickActions: FC<ClipboardQuickActionsProps> = (props) => {
   const overflowActions = availableActions.slice(INLINE_ACTIONS_LIMIT);
 
   return (
-    <div className="flex h-6 min-w-0 shrink-0 items-center justify-end gap-1">
+    <div className="flex h-6 min-w-0 shrink-0 items-center justify-end">
       <span
         className={cn(
           "min-w-0 truncate transition-all duration-150 ease-out motion-reduce:transition-none",
@@ -72,9 +72,9 @@ const ClipboardQuickActions: FC<ClipboardQuickActionsProps> = (props) => {
         <div
           aria-hidden={!actionsVisible}
           className={cn(
-            "pointer-events-none flex items-center gap-0.5 opacity-0 transition-all duration-150 ease-out motion-reduce:transition-none",
+            "pointer-events-none flex items-center gap-0 opacity-0 transition-all duration-150 ease-out motion-reduce:transition-none",
             {
-              "pointer-events-auto opacity-100": actionsVisible,
+              "pointer-events-auto gap-0.5 pl-1 opacity-100": actionsVisible,
             },
           )}
         >
@@ -82,7 +82,12 @@ const ClipboardQuickActions: FC<ClipboardQuickActionsProps> = (props) => {
             {inlineActions.map((action) => {
               return (
                 <motion.span
-                  animate={{ opacity: 1, scale: 1, width: "1.25rem", x: 0 }}
+                  animate={{
+                    opacity: actionsVisible ? 1 : 0,
+                    scale: 1,
+                    width: actionsVisible ? "1.25rem" : 0,
+                    x: 0,
+                  }}
                   className="flex overflow-hidden"
                   exit={{
                     opacity: 0,
@@ -109,14 +114,13 @@ const ClipboardQuickActions: FC<ClipboardQuickActionsProps> = (props) => {
             })}
           </AnimatePresence>
 
-          {overflowActions.length > 0 ? (
+          {actionsVisible && overflowActions.length > 0 ? (
             <OverflowActionsMenu
               actions={overflowActions}
               isFavorite={item.isFavorite}
               isPinned={item.isPinned}
               labels={labels}
               onQuickAction={onQuickAction}
-              visible={actionsVisible}
             />
           ) : null}
         </div>
@@ -131,15 +135,13 @@ interface OverflowActionsMenuProps {
   isPinned: boolean;
   labels: ItemActionLabels;
   onQuickAction: (action: ItemAction) => Promise<void> | void;
-  visible: boolean;
 }
 
 /**
  * 折叠的溢出动作「…」菜单：antd Dropdown，菜单项复用动作的图标与文案。
  */
 const OverflowActionsMenu: FC<OverflowActionsMenuProps> = (props) => {
-  const { actions, isFavorite, isPinned, labels, onQuickAction, visible } =
-    props;
+  const { actions, isFavorite, isPinned, labels, onQuickAction } = props;
 
   const menuItems = actions.map((action) => {
     const presentation = resolveItemActionPresentation(action, labels, {
@@ -168,17 +170,14 @@ const OverflowActionsMenu: FC<OverflowActionsMenuProps> = (props) => {
     >
       <button
         aria-label={labels.more}
-        className={cn(
-          "flex size-5 items-center justify-center rounded-1.5 border-0 bg-transparent text-ant-secondary transition-colors hover:bg-ant-fill-tertiary hover:text-ant-text motion-reduce:transition-none",
-          { invisible: !visible },
-        )}
+        className="flex size-5 items-center justify-center rounded-1.5 border-0 bg-transparent text-ant-secondary transition-colors hover:bg-ant-fill-tertiary hover:text-ant-text motion-reduce:transition-none"
         onClick={(event) => {
           event.stopPropagation();
         }}
         onPointerDown={(event) => {
           event.stopPropagation();
         }}
-        tabIndex={visible ? 0 : -1}
+        tabIndex={0}
         type="button"
       >
         <i aria-hidden="true" className="i-lucide:ellipsis text-sm" />
