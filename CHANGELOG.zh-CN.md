@@ -1,5 +1,11 @@
 # 更新日志
 
+## [1.2.3](https://github.com/mecoren/EcoPaste/compare/v1.2.2...v1.2.3) (2026-09-15)
+
+### 🐛 问题修复
+
+* 将版本检测、更新下载与发布说明链接统一指向 mecoren/EcoPaste
+
 ## [1.2.2](https://github.com/mecoren/EcoPaste/compare/v1.2.1...v1.2.2) (2026-09-15)
 
 ### 🐛 问题修复
