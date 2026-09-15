@@ -20,5 +20,9 @@
   "units": {
     "items": "{{count}} items",
     "settings": "{{count}} settings"
+  },
+  "window": {
+    "close": "Close",
+    "minimize": "Minimize"
   }
 }

@@ -30,6 +30,7 @@ import BackupImportModal from "./components/BackupImportModal";
 import PreferenceHeader from "./components/PreferenceHeader";
 import PreferenceSection from "./components/PreferenceSection";
 import PreferenceSidebar from "./components/PreferenceSidebar";
+import PreferenceTitlebar from "./components/PreferenceTitlebar";
 import { preferenceTabs } from "./config/preferenceSchema";
 import {
   commitSettingChange,
@@ -337,10 +338,12 @@ const Preference: FC = () => {
   if (!activeTab) return null;
 
   return (
-    <div className="h-screen overflow-hidden bg-ant-layout text-ant-text">
+    <div className="flex h-screen flex-col overflow-hidden bg-ant-layout text-ant-text">
+      <PreferenceTitlebar />
+
       <motion.div
         animate={{ opacity: 1, y: 0 }}
-        className="flex h-full overflow-hidden bg-ant-layout"
+        className="flex min-h-0 flex-1 overflow-hidden bg-ant-layout"
         data-tauri-drag-region
         initial={{ opacity: 0, y: reduceMotion ? 0 : 6 }}
         transition={{ duration: reduceMotion ? 0 : 0.18, ease: "easeOut" }}

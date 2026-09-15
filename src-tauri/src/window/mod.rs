@@ -345,6 +345,10 @@ pub fn build_preference_window(app_handle: &AppHandle) -> Result<()> {
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true);
 
+    // Windows 无 Overlay 语义，关闭原生装饰改由前端渲染自定义标题栏
+    #[cfg(target_os = "windows")]
+    let builder = builder.decorations(false);
+
     builder
         .build()
         .map_err(|err| anyhow::anyhow!("build preference window: {err}"))?;
