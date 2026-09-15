@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.2.4](https://github.com/mecoren/EcoPaste/compare/v1.2.3...v1.2.4) (2026-09-15)
+
+### ✨ Features
+
+* navigate categories and source app with arrow keys ([83255d0](https://github.com/mecoren/EcoPaste/commit/83255d0))
+
 ## [1.2.3](https://github.com/mecoren/EcoPaste/compare/v1.2.2...v1.2.3) (2026-09-15)
 
 ### 🐛 Bug Fixes

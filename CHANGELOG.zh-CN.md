@@ -1,5 +1,11 @@
 # 更新日志
 
+## [1.2.4](https://github.com/mecoren/EcoPaste/compare/v1.2.3...v1.2.4) (2026-09-15)
+
+### ✨ 新功能
+
+* 用方向键在分类与来源应用间导航，落到来源应用时自动展开下拉并聚焦搜索框 ([83255d0](https://github.com/mecoren/EcoPaste/commit/83255d0))
+
 ## [1.2.3](https://github.com/mecoren/EcoPaste/compare/v1.2.2...v1.2.3) (2026-09-15)
 
 ### 🐛 问题修复
