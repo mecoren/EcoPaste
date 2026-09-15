@@ -11,6 +11,10 @@ export const TAURI_EVENT = {
   CONTEXT_SUBMENU_SHOW: "context-submenu://show",
   KEYBOARD_NAV: "keyboard://nav",
   PREFERENCE_HIGHLIGHT_SETTING: "preference://highlight-setting",
+  /** Rust 广播：指针是否落在预览面板命中矩形内（驱动面板放大 / 主窗 hover 缓冲）。 */
+  PREVIEW_POINTER: "preview://pointer",
+  /** 预览窗 → 主窗：当前选中的片段文本（`null` 表示选区已清空）。 */
+  PREVIEW_SELECTION: "preview://selection",
   PREVIEW_UPDATED: "preview://updated",
   SEARCH_TYPING: "clipboard://search-typing",
   SETTINGS_UPDATED: "settings://updated",

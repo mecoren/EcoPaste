@@ -52,6 +52,8 @@ export function useClipboardPreviewController(
   );
   const hoverTimerRef = useRef<number | null>(null);
   const hoverHideTimerRef = useRef<number | null>(null);
+  // 指针是否停在预览面板上（由 Rust 的 `preview://pointer` 事件驱动）。
+  const panelPointerInsideRef = useRef(false);
   const clipboardWindowVisibleRef = useRef(true);
   const previewSessionRef = useRef<PreviewSession | null>(null);
   const previewOpenRequestIdRef = useRef(0);
@@ -126,15 +128,57 @@ export function useClipboardPreviewController(
 
   useTauriListen(TAURI_EVENT.WINDOW_VISIBILITY, handleWindowVisibility);
 
+  /**
+   * 指针进出预览面板：进入时抵消「离开列表区」的关闭缓冲，离开时重新进入缓冲。
+   * 主窗的 `pointerleave` 与 Rust 的指针采样有先后不确定性，故同时用 ref 记录面板状态，
+   * 让 `scheduleHoverHide` 在指针仍停在面板上时不再安排关闭（见其实现）。
+   */
+  const handlePreviewPointer = (event: { payload: { inside: boolean } }) => {
+    const { inside } = event.payload;
+    panelPointerInsideRef.current = inside;
+
+    if (inside) {
+      cancelHoverHide();
+      return;
+    }
+
+    scheduleHoverHide("previewPanelLeave");
+  };
+
+  useTauriListen<{ inside: boolean }>(
+    TAURI_EVENT.PREVIEW_POINTER,
+    handlePreviewPointer,
+  );
+
+  /**
+   * 主窗失焦：用户切到别的应用时收起预览。
+   *
+   * 例外：指针停在预览面板上时不关。面板是可交互的兄弟窗口，**点击它会让主窗失焦**，
+   * 那不是「用户离开」，而是用户正在面板里操作；不豁免的话点一下面板预览就被自己关掉。
+   */
   const handleWindowBlur = () => {
     if (!previewSessionRef.current) return;
+    if (panelPointerInsideRef.current) {
+      log.debug("preview blur ignored: pointer inside panel");
+      return;
+    }
 
     closePreview("windowBlur");
   };
 
   useEventListener("blur", handleWindowBlur, { target: window });
 
+  /**
+   * 主窗尺寸变化后面板定位就失效了，正常应收起；但指针停在面板上时不关
+   * （点击面板会让主窗短暂走一次样式/焦点扰动，可能连带产生 resize 事件）。
+   * 等指针离开面板，关闭缓冲会自然收掉。
+   */
   const handleWindowResize = () => {
+    if (panelPointerInsideRef.current) {
+      log.debug("preview resize ignored: pointer inside panel");
+      return;
+    }
+
     closePreview("windowResize");
   };
 
@@ -406,12 +450,15 @@ export function useClipboardPreviewController(
 
   /**
    * 鼠标离开剪贴板项后进入准备隐藏状态，短时间内进入新项会取消隐藏。
+   * 指针已停在预览面板上时不安排关闭：主窗 `pointerleave` 与 Rust 指针采样的先后
+   * 顺序不确定，若此时排上缓冲会因为没有后续事件来抵消而误关正在交互的面板。
    */
   const scheduleHoverHide = (reason: string) => {
     cancelHoverPreview();
     cancelHoverHide();
 
     if (previewSessionRef.current?.trigger !== "hover") return;
+    if (panelPointerInsideRef.current) return;
 
     hoverHideTimerRef.current = window.setTimeout(() => {
       hoverHideTimerRef.current = null;

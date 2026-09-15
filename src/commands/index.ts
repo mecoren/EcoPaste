@@ -144,6 +144,8 @@ export interface ClipboardPreviewPayload {
   imageExists: boolean;
   files: ClipboardPreviewFileEntry[];
   totalFiles: number;
+  /** Files 预览渲染模式：与列表卡片同判据（单文件 + 图片 + 文件存在 → 按图片渲染）。 */
+  filesPreviewKind: "imagePreview" | "list";
 }
 
 export interface StorageUsage {
@@ -1070,11 +1072,43 @@ export const saveClipboardImageToFile = async (id: string) => {
  * `plain` 为显式纯文本动作；默认复制格式由 Rust 按设置与记录类型决定。
  * 成功后统一 toast「已复制」，调用方无需再处理。
  */
-export const writeToClipboard = async (id: string, plain: boolean) => {
+export const writeToClipboard = async (
+  id: string,
+  plain: boolean,
+  options: { silent?: boolean } = {},
+) => {
   await call<void>(TAURI_COMMAND.WRITE_TO_CLIPBOARD, "commands:labels.copy", {
     id,
     plain,
   });
+
+  if (options.silent) return;
+
+  getMessageApi().success(i18n.t("commands:messages.copied"));
+};
+
+/**
+ * 把任意纯文本写入剪贴板（预览面板「复制选中片段」）。
+ *
+ * 与 `writeToClipboard` 的区别：不按记录 id 写回，也不登记回环抑制——
+ * 期望 OS 监听管线把这段文本按既有去重 / 搜索语义收成一条新记录。
+ *
+ * `silent` 用于预览窗内调用：那边已有按钮自身的 ✓ 反馈，再弹一次 antd toast
+ * 会在两个窗口各飘一条，视觉上重复。
+ */
+export const writeTextToClipboard = async (
+  text: string,
+  options: { silent?: boolean } = {},
+) => {
+  await call<void>(
+    TAURI_COMMAND.WRITE_TEXT_TO_CLIPBOARD,
+    "commands:labels.copy",
+    {
+      text,
+    },
+  );
+
+  if (options.silent) return;
 
   getMessageApi().success(i18n.t("commands:messages.copied"));
 };
@@ -1602,11 +1636,13 @@ export const showClipboardPreview = (
 
 /**
  * 关闭剪贴板系统级预览 overlay。
+ * `reason` 只用于日志：前端无法预知「哪条关闭路径」会被触发，写进 Rust 日志便于回溯。
  */
-export const closeClipboardPreview = () => {
+export const closeClipboardPreview = (reason: string) => {
   return call<void>(
     TAURI_COMMAND.CLOSE_CLIPBOARD_PREVIEW,
     "commands:labels.closePreview",
+    { reason },
   );
 };
 
@@ -1629,6 +1665,34 @@ export const getClipboardPreviewPayload = (itemId: string) => {
     "commands:labels.loadPreviewContent",
     { itemId },
   );
+};
+
+/**
+ * 上报预览面板的实测矩形（overlay 局部逻辑坐标），供 Rust 维护鼠标命中判定。
+ * 随面板动画高频调用；失败可自愈（Rust 回退到 layout 面板框），故只记日志不弹 toast。
+ */
+export const setClipboardPreviewPanelRect = async (
+  rect: ClipboardPreviewRect,
+) => {
+  try {
+    await invoke<void>(TAURI_COMMAND.SET_CLIPBOARD_PREVIEW_PANEL_RECT, {
+      rect,
+    });
+  } catch (error) {
+    log.error("set clipboard preview panel rect failed", toAppError(error));
+  }
+};
+
+/**
+ * 上报指针进入 / 离开预览面板。离开方向必须立即回报：翻转期间整个全屏 overlay
+ * 都在接收鼠标事件，等 Rust 采样周期会让面板外的点击短暂失效。
+ */
+export const setClipboardPreviewPointer = async (inside: boolean) => {
+  try {
+    await invoke<void>(TAURI_COMMAND.SET_CLIPBOARD_PREVIEW_POINTER, { inside });
+  } catch (error) {
+    log.error("set clipboard preview pointer failed", toAppError(error));
+  }
 };
 
 /**

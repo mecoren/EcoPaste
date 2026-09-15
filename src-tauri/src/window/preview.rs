@@ -23,7 +23,7 @@ use crate::core::Result;
 use super::{get_window, lifecycle, CLIPBOARD_PREVIEW_WINDOW_LABEL, CLIPBOARD_WINDOW_LABEL};
 
 #[cfg(target_os = "macos")]
-use tauri_nspanel::{tauri_panel, ManagerExt, PanelLevel, WebviewWindowExt};
+use tauri_nspanel::{tauri_panel, ManagerExt, PanelLevel, StyleMask, WebviewWindowExt};
 
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::HWND;
@@ -33,12 +33,22 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 const PREVIEW_UPDATED_EVENT: &str = "preview://updated";
+/// 与前端 `src/constants/events.ts` 的 `TAURI_EVENT.PREVIEW_POINTER` 一一对应。
+pub const PREVIEW_POINTER_EVENT: &str = "preview://pointer";
 const PREVIEW_PANEL_WIDTH: f64 = 480.0;
 const PREVIEW_PANEL_HEIGHT: f64 = 480.0;
 const PREVIEW_PANEL_GAP: f64 = 40.0;
 const PREVIEW_PANEL_MARGIN: f64 = 32.0;
 const PREVIEW_POINTER_ANCHOR_SIZE: f64 = 1.0;
 const PREVIEW_HIDE_DELAY_MS: u64 = 180;
+/// 指针采样周期（预览可见时）。
+const PREVIEW_POINTER_POLL_INTERVAL: Duration = Duration::from_millis(40);
+/// 指针采样周期（预览不可见时的空转，只等下一次 show）。
+const PREVIEW_POINTER_IDLE_INTERVAL: Duration = Duration::from_millis(200);
+/// 命中矩形外扩（逻辑 px）：面板带阴影与边框，点击面板边缘（视觉上仍在面板上）
+/// 不应被鼠标钩子判成外部点击；取值刻意压得很小，避免在面板外圈留下一段
+/// 「采样认为在面板内、DOM 认为在面板外」的死区。
+const PREVIEW_PANEL_HIT_PADDING: f64 = 4.0;
 
 static PREVIEW_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 static PREVIEW_SESSION_ID: AtomicU64 = AtomicU64::new(0);
@@ -49,6 +59,19 @@ static PREVIEW_STATE: LazyLock<Mutex<Option<ClipboardPreviewState>>> =
 /// 都过了存在性检查会触发重复 label 建窗报错。建窗都来自命令/后台线程、主线程从不持锁，
 /// 不会与 builder 内部的主线程派发互锁。
 static PREVIEW_BUILD_LOCK: Mutex<()> = Mutex::new(());
+/// 前端上报的面板实测矩形（overlay 局部逻辑坐标）；未上报时回退本次 layout 的 `panel_rect`。
+static PREVIEW_PANEL_RECT: LazyLock<Mutex<Option<PreviewRect>>> =
+    LazyLock::new(|| Mutex::new(None));
+/// 面板命中矩形的物理像素边界缓存：指针采样与鼠标钩子每 tick 都要读，
+/// 预先算好避免反复克隆整个预览状态。
+static PREVIEW_HIT_BOUNDS: LazyLock<Mutex<Option<PreviewHitBounds>>> =
+    LazyLock::new(|| Mutex::new(None));
+/// 预览 overlay 是否可见；鼠标钩子据此做零成本门控。
+static PREVIEW_VISIBLE: AtomicBool = AtomicBool::new(false);
+/// 指针当前是否落在面板命中矩形内（穿透开关的镜像）。
+static PREVIEW_POINTER_INSIDE: AtomicBool = AtomicBool::new(false);
+/// 指针采样线程单飞位。线程随应用存活，预览不可见时空转。
+static PREVIEW_POINTER_WATCHER: AtomicBool = AtomicBool::new(false);
 
 #[cfg(target_os = "macos")]
 tauri_panel! {
@@ -89,13 +112,35 @@ pub struct PreviewClipboardWindowRect {
     pub height: u32,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewRect {
     pub left: f64,
     pub top: f64,
     pub width: f64,
     pub height: f64,
+}
+
+/// 面板命中矩形的物理像素边界（左闭右开）。
+#[derive(Clone, Copy, Debug)]
+struct PreviewHitBounds {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+impl PreviewHitBounds {
+    fn contains(self, x: i32, y: i32) -> bool {
+        x >= self.left && x < self.right && y >= self.top && y < self.bottom
+    }
+}
+
+/// `preview://pointer` 的载荷：指针是否落在面板命中矩形内。
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewPointerPayload {
+    inside: bool,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -151,8 +196,6 @@ pub fn show_clipboard_preview(
     let clipboard_window = clipboard_window_rect(app);
     let layout = build_preview_layout(&anchor, scale_factor, &work_area, clipboard_window.as_ref());
 
-    prepare_preview_window_for_show(app, &window, &work_area)?;
-
     let state = ClipboardPreviewState {
         request_id,
         session_id,
@@ -169,7 +212,9 @@ pub fn show_clipboard_preview(
         clipboard_window,
     };
 
+    // 状态先落库再 prepare：retarget 时命中矩形要按**本次** layout 重算。
     set_preview_state(Some(state.clone()));
+    prepare_preview_window_for_show(app, &window, &work_area)?;
     window
         .emit(PREVIEW_UPDATED_EVENT, &state)
         .map_err(|e| anyhow::anyhow!(e))?;
@@ -179,7 +224,16 @@ pub fn show_clipboard_preview(
 }
 
 /// 隐藏预览窗口并清空当前预览状态。
-pub fn close_clipboard_preview(app: &AppHandle) -> Result<()> {
+///
+/// `reason` 由前端各关闭路径传入并落进本地日志：前端日志不会写进 Rust 日志文件，
+/// 而「预览为什么自己关了」几乎只能从这里回溯（哪条路径、当时指针是否在面板上）。
+pub fn close_clipboard_preview(app: &AppHandle, reason: &str) -> Result<()> {
+    log::info!(
+        "preview close requested: reason={reason}, visible={}, pointer_inside={}",
+        PREVIEW_VISIBLE.load(Ordering::Relaxed),
+        PREVIEW_POINTER_INSIDE.load(Ordering::Relaxed)
+    );
+
     let request_id = PREVIEW_REQUEST_ID.fetch_add(1, Ordering::SeqCst) + 1;
     set_preview_state(None);
 
@@ -203,6 +257,9 @@ pub fn close_clipboard_preview_now(app: &AppHandle) -> Result<()> {
             .emit(PREVIEW_UPDATED_EVENT, Option::<ClipboardPreviewState>::None)
             .map_err(|e| anyhow::anyhow!(e))?;
         hide_preview_window(app, &window)?;
+    } else {
+        // 窗口已被空闲销毁：没有 hide 收口点，这里补齐指针状态复位。
+        reset_pointer_tracking();
     }
 
     Ok(())
@@ -210,6 +267,8 @@ pub fn close_clipboard_preview_now(app: &AppHandle) -> Result<()> {
 
 /// 剪贴板窗口开始隐藏时压制后续过期 show 请求，并立即收起预览窗口。
 pub fn suppress_for_clipboard_hide(app: &AppHandle) {
+    log::info!("preview suppressed: clipboard window is hiding");
+
     PREVIEW_SUPPRESSED.store(true, Ordering::SeqCst);
     if let Err(error) = close_clipboard_preview_now(app) {
         log::error!("suppress preview on clipboard hide failed: {error}");
@@ -230,6 +289,317 @@ pub fn get_clipboard_preview_state() -> Result<Option<ClipboardPreviewState>> {
     });
 
     Ok(guard.clone())
+}
+
+/// 记录前端上报的面板实测矩形（overlay 局部逻辑坐标）；非法值直接忽略。
+///
+/// 前端的面板尺寸按内容动态计算（宽度上限 480、高度按内容与交互态变化），
+/// Rust 只能拿到本次 layout 的 480 框，故命中判定以前端实测值为准。
+pub fn update_panel_rect(rect: PreviewRect) {
+    if !is_valid_rect(rect) {
+        log::warn!("ignore invalid preview panel rect: {rect:?}");
+        return;
+    }
+
+    {
+        let mut guard = PREVIEW_PANEL_RECT.lock().unwrap_or_else(|poisoned| {
+            log::error!("preview panel rect mutex poisoned on set, recovering");
+            poisoned.into_inner()
+        });
+        *guard = Some(rect);
+    }
+
+    refresh_hit_bounds();
+    log::info!(
+        "preview panel rect reported: logical={rect:?}, hit_bounds={:?}",
+        read_hit_bounds()
+    );
+}
+
+/// 前端面板 `pointerenter` / `pointerleave` 的即时回报：离开方向不能等采样周期，
+/// 否则翻转期间整个全屏 overlay 会短暂吞掉面板外的点击。
+///
+/// `inside = false` 不直接置穿透，而是按真实光标位置重判——DOM 的 leave 与命中矩形
+/// 在面板边缘会有 1-4px 的差异，交给同一套判定收口，避免两个真相源互相打脸。
+pub fn report_pointer_inside(app: &AppHandle, inside: bool) {
+    if !PREVIEW_VISIBLE.load(Ordering::Relaxed) {
+        return;
+    }
+
+    log::info!(
+        "preview panel pointer report: inside={inside}, hit_bounds={:?}",
+        read_hit_bounds()
+    );
+
+    if inside {
+        apply_pointer_inside(app, true);
+        return;
+    }
+
+    reconcile_pointer(app, false);
+}
+
+/// 判断 physical 坐标是否落在当前面板命中矩形内。预览不可见时立即返回 `false`，
+/// 供 Windows 鼠标钩子在 button-down 判定链里做零成本门控。
+pub fn panel_contains_physical_point(x: i32, y: i32) -> bool {
+    if !PREVIEW_VISIBLE.load(Ordering::Relaxed) {
+        return false;
+    }
+
+    read_hit_bounds().is_some_and(|bounds| bounds.contains(x, y))
+}
+
+/// 按真实光标位置校对穿透开关；跨边界时才翻转。
+///
+/// `enter_only = true` 用于周期采样：**只允许从穿透翻到可交互**。离开方向由面板前端的
+/// `pointerleave` 精确驱动——采样若也负责离开，拖选滑出面板边缘（DOM 侧已按「按住期间
+/// 不回报」挡掉）就会被中途打回穿透，拖选与滚动会当场断掉。
+/// 布局变化（retarget）等显式场景用 `enter_only = false` 做完整校对。
+fn reconcile_pointer(app: &AppHandle, enter_only: bool) {
+    if !PREVIEW_VISIBLE.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let Some(bounds) = read_hit_bounds() else {
+        return;
+    };
+    let Some((origin_x, origin_y, scale_factor)) = preview_overlay_metrics() else {
+        return;
+    };
+    let Some((x, y)) = current_cursor_physical(origin_x, origin_y, scale_factor) else {
+        return;
+    };
+
+    let inside = bounds.contains(x, y);
+
+    if enter_only && !inside {
+        return;
+    }
+
+    if inside == PREVIEW_POINTER_INSIDE.load(Ordering::Relaxed) {
+        return;
+    }
+
+    log::info!(
+        "preview pointer -> {inside} (cursor={x},{y}, bounds={bounds:?}, enter_only={enter_only})"
+    );
+    apply_pointer_inside(app, inside);
+}
+
+/// 翻转穿透开关并广播 `preview://pointer`；重复调用幂等。
+fn apply_pointer_inside(app: &AppHandle, inside: bool) {
+    if PREVIEW_POINTER_INSIDE.swap(inside, Ordering::SeqCst) == inside {
+        return;
+    }
+
+    let handle = app.clone();
+    if let Err(err) = app.run_on_main_thread(move || {
+        let Some(window) = handle.get_webview_window(CLIPBOARD_PREVIEW_WINDOW_LABEL) else {
+            return;
+        };
+        if let Err(err) = window.set_ignore_cursor_events(!inside) {
+            log::warn!("set preview ignore cursor events failed: {err}");
+        }
+        // macOS：面板转换后 `set_ignore_cursor_events` 走的是 NSWindow 语义，
+        // 这里再按 NSPanel 自己的 API 设一次，避免依赖 Tauri 对面板的实现细节。
+        #[cfg(target_os = "macos")]
+        if let Ok(panel) = handle.get_webview_panel(CLIPBOARD_PREVIEW_WINDOW_LABEL) {
+            panel.set_ignores_mouse_events(!inside);
+        }
+    }) {
+        log::warn!("schedule preview pointer toggle failed: {err}");
+        return;
+    }
+
+    if let Err(err) = app.emit(PREVIEW_POINTER_EVENT, PreviewPointerPayload { inside }) {
+        log::warn!("emit {PREVIEW_POINTER_EVENT} failed: {err}");
+    }
+}
+
+/// 预览隐藏收口：清空命中缓存并复位指针状态，避免残留状态让鼠标钩子误判。
+fn reset_pointer_tracking() {
+    PREVIEW_VISIBLE.store(false, Ordering::Relaxed);
+    PREVIEW_POINTER_INSIDE.store(false, Ordering::SeqCst);
+
+    let mut guard = PREVIEW_HIT_BOUNDS.lock().unwrap_or_else(|poisoned| {
+        log::error!("preview hit bounds mutex poisoned on reset, recovering");
+        poisoned.into_inner()
+    });
+    *guard = None;
+}
+
+/// 指针采样线程：面板初始对鼠标穿透，前端拿不到 `pointerenter`，
+/// 必须由 Rust 主动判断「光标已进入面板矩形」才能翻转，故用低频采样而不是平台事件钩子
+/// ——省掉 Windows 低层鼠标钩子的 per-move 开销与 macOS NSEvent 监听的平台依赖。
+/// 线程随应用存活，预览不可见时空转。
+fn ensure_pointer_watcher(app: &AppHandle) {
+    if PREVIEW_POINTER_WATCHER.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let handle = app.clone();
+
+    thread::spawn(move || loop {
+        let visible = PREVIEW_VISIBLE.load(Ordering::Relaxed);
+
+        if visible {
+            reconcile_pointer(&handle, true);
+        }
+
+        thread::sleep(if visible {
+            PREVIEW_POINTER_POLL_INTERVAL
+        } else {
+            PREVIEW_POINTER_IDLE_INTERVAL
+        });
+    });
+}
+
+/// 按当前预览状态重算命中矩形缓存。
+fn refresh_hit_bounds() {
+    let bounds = resolve_hit_bounds();
+
+    let mut guard = PREVIEW_HIT_BOUNDS.lock().unwrap_or_else(|poisoned| {
+        log::error!("preview hit bounds mutex poisoned on set, recovering");
+        poisoned.into_inner()
+    });
+    *guard = bounds;
+}
+
+fn read_hit_bounds() -> Option<PreviewHitBounds> {
+    let guard = PREVIEW_HIT_BOUNDS.lock().unwrap_or_else(|poisoned| {
+        log::error!("preview hit bounds mutex poisoned on read, recovering");
+        poisoned.into_inner()
+    });
+
+    *guard
+}
+
+/// 面板逻辑矩形 → 屏幕物理像素边界；前端尚未上报实测矩形时回退本次 layout。
+fn resolve_hit_bounds() -> Option<PreviewHitBounds> {
+    let state = get_clipboard_preview_state().ok().flatten()?;
+    let reported = {
+        let guard = PREVIEW_PANEL_RECT.lock().unwrap_or_else(|poisoned| {
+            log::error!("preview panel rect mutex poisoned on read, recovering");
+            poisoned.into_inner()
+        });
+        *guard
+    };
+    let rect = reported.unwrap_or(state.layout.panel_rect);
+
+    Some(physical_bounds(
+        rect,
+        state.scale_factor,
+        state.work_area.x,
+        state.work_area.y,
+    ))
+}
+
+/// overlay 局部逻辑矩形 → 屏幕物理像素边界（左闭右开），含命中容差外扩。
+fn physical_bounds(
+    rect: PreviewRect,
+    scale_factor: f64,
+    origin_x: i32,
+    origin_y: i32,
+) -> PreviewHitBounds {
+    let scale = if scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    let origin_x = f64::from(origin_x);
+    let origin_y = f64::from(origin_y);
+
+    PreviewHitBounds {
+        bottom: (origin_y + (rect.bottom() + PREVIEW_PANEL_HIT_PADDING) * scale).ceil() as i32,
+        left: (origin_x + (rect.left - PREVIEW_PANEL_HIT_PADDING) * scale).floor() as i32,
+        right: (origin_x + (rect.right() + PREVIEW_PANEL_HIT_PADDING) * scale).ceil() as i32,
+        top: (origin_y + (rect.top - PREVIEW_PANEL_HIT_PADDING) * scale).floor() as i32,
+    }
+}
+
+fn is_valid_rect(rect: PreviewRect) -> bool {
+    [rect.left, rect.top, rect.width, rect.height]
+        .iter()
+        .all(|value| value.is_finite())
+        && rect.width > 0.0
+        && rect.height > 0.0
+}
+
+/// 取 overlay 的原点（屏幕物理像素）与缩放；无预览状态时为 `None`。
+/// 独立于 [`get_clipboard_preview_state`]，采样线程每 tick 调用，不做状态克隆。
+fn preview_overlay_metrics() -> Option<(i32, i32, f64)> {
+    let guard = PREVIEW_STATE.lock().unwrap_or_else(|poisoned| {
+        log::error!("preview state mutex poisoned on metrics, recovering");
+        poisoned.into_inner()
+    });
+    let state = guard.as_ref()?;
+
+    Some((state.work_area.x, state.work_area.y, state.scale_factor))
+}
+
+/// 取当前光标的屏幕物理像素坐标。
+#[cfg(target_os = "windows")]
+fn current_cursor_physical(
+    _origin_x: i32,
+    _origin_y: i32,
+    _scale_factor: f64,
+) -> Option<(i32, i32)> {
+    use winapi::shared::windef::POINT;
+    use winapi::um::winuser::GetCursorPos;
+
+    let mut point = POINT { x: 0, y: 0 };
+
+    if unsafe { GetCursorPos(&mut point) } == 0 {
+        return None;
+    }
+
+    Some((point.x, point.y))
+}
+
+/// Quartz 的全局显示坐标是**点**（原点在主显示器左上、y 向下），需要按 overlay 显示器
+/// 换算成屏幕物理像素：显示器原点（物理）加上「光标相对显示器原点的点距离 × 缩放」。
+#[cfg(target_os = "macos")]
+fn current_cursor_physical(origin_x: i32, origin_y: i32, scale_factor: f64) -> Option<(i32, i32)> {
+    use core_graphics::event::CGEvent;
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState).ok()?;
+    // `CGEventCreate(NULL)` 返回的事件位置即当前鼠标位置；只读位置、不投递事件，无需额外权限。
+    let event = CGEvent::new(source).ok()?;
+    let location = event.location();
+
+    Some(screen_points_to_physical(
+        location.x,
+        location.y,
+        origin_x,
+        origin_y,
+        scale_factor,
+    ))
+}
+
+/// 屏幕点坐标 → 屏幕物理像素坐标的纯换算，独立出来便于单测。
+#[cfg(target_os = "macos")]
+fn screen_points_to_physical(
+    point_x: f64,
+    point_y: f64,
+    origin_x: i32,
+    origin_y: i32,
+    scale_factor: f64,
+) -> (i32, i32) {
+    let scale = if scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    let origin_x = f64::from(origin_x);
+    let origin_y = f64::from(origin_y);
+    let origin_points_x = origin_x / scale;
+    let origin_points_y = origin_y / scale;
+
+    (
+        (origin_x + (point_x - origin_points_x) * scale).round() as i32,
+        (origin_y + (point_y - origin_points_y) * scale).round() as i32,
+    )
 }
 
 /// 按需重建预览窗口。预览窗口不再由 Tauri 配置预创建（改为空闲销毁 + 按需重建），
@@ -267,6 +637,9 @@ pub fn build_clipboard_preview_window(app: &AppHandle) -> Result<()> {
     .skip_taskbar(true)
     .focused(false)
     .focusable(false)
+    // macOS：面板转为可交互后，第一次点击要直达内容（滚动 / 拖选），
+    // 否则会被当成「激活点击」吃掉。
+    .accept_first_mouse(true)
     .disable_drag_drop_handler()
     .visible(false)
     .build()
@@ -380,10 +753,49 @@ fn prepare_preview_window_for_show(
     work_area: &PhysicalRect<i32, u32>,
 ) -> Result<()> {
     apply_preview_window_bounds(window, work_area)?;
+    sync_pointer_for_show(app, window)?;
+    raise_preview_window(app, window)
+}
+
+/// show 前的穿透开关同步：
+/// - 新一次 show（此前不可见）：锚点来自指针所在的列表卡片，先按穿透呈现，
+///   采样线程会在下一个周期把真实指针状态纠正回来；
+/// - retarget（此前可见）：按当前指针位置重新判定并广播——写死穿透会把正在
+///   面板上拖选的用户瞬间打回穿透，选中与滚动都会被打断。
+fn sync_pointer_for_show(app: &AppHandle, window: &WebviewWindow) -> Result<()> {
+    let retarget = PREVIEW_VISIBLE.load(Ordering::Relaxed);
+
+    if !retarget {
+        // 前端上报的实测矩形属于上一次会话，先清掉，回退到本次 layout 的面板框。
+        clear_reported_panel_rect();
+        PREVIEW_POINTER_INSIDE.store(false, Ordering::SeqCst);
+    }
+
+    refresh_hit_bounds();
+    log::info!(
+        "preview show sync: retarget={retarget}, hit_bounds={:?}",
+        read_hit_bounds()
+    );
+
+    if retarget {
+        // 面板换了位置：完整校对一次，指针被留在外面时立即交还穿透。
+        reconcile_pointer(app, false);
+        return Ok(());
+    }
+
     window
         .set_ignore_cursor_events(true)
         .map_err(|e| anyhow::anyhow!(e))?;
-    raise_preview_window(app, window)
+
+    Ok(())
+}
+
+fn clear_reported_panel_rect() {
+    let mut guard = PREVIEW_PANEL_RECT.lock().unwrap_or_else(|poisoned| {
+        log::error!("preview panel rect mutex poisoned on clear, recovering");
+        poisoned.into_inner()
+    });
+    *guard = None;
 }
 
 /// 平台 show 收口点；成功后推进生命周期到 `Visible`，使未触发的空闲销毁计时器过期。
@@ -405,6 +817,8 @@ fn show_preview_window(
         raise_windows_preview_window(window, true)?;
     }
 
+    PREVIEW_VISIBLE.store(true, Ordering::Relaxed);
+    ensure_pointer_watcher(app);
     lifecycle::on_shown(app, CLIPBOARD_PREVIEW_WINDOW_LABEL);
 
     Ok(())
@@ -423,6 +837,7 @@ fn hide_preview_window(app: &AppHandle, window: &WebviewWindow) -> Result<()> {
     #[cfg(target_os = "windows")]
     window.hide().map_err(|e| anyhow::anyhow!(e))?;
 
+    reset_pointer_tracking();
     lifecycle::on_hidden(app, CLIPBOARD_PREVIEW_WINDOW_LABEL, "preview-hide");
 
     Ok(())
@@ -454,7 +869,9 @@ fn setup_macos_preview_panel(app: &AppHandle, window: &WebviewWindow) -> Result<
     };
 
     panel.set_level(PanelLevel::Status.value());
-    panel.set_ignores_mouse_events(true);
+    // 面板要接收鼠标事件才能滚动与拖选，但必须保持「不激活 App、不抢 key」：
+    // 否则点击面板会让主 panel resign key，连带把预览收起。
+    panel.set_style_mask(StyleMask::empty().nonactivating_panel().into());
 
     Ok(())
 }
@@ -466,7 +883,6 @@ fn set_macos_preview_panel_level(app: &AppHandle) -> Result<()> {
     app.run_on_main_thread(move || {
         if let Ok(panel) = handle.get_webview_panel(CLIPBOARD_PREVIEW_WINDOW_LABEL) {
             panel.set_level(PanelLevel::Status.value());
-            panel.set_ignores_mouse_events(true);
         }
     })
     .map_err(|e| anyhow::anyhow!(e))?;
@@ -487,7 +903,6 @@ fn show_macos_preview_panel(app: &AppHandle, work_area: &PhysicalRect<i32, u32>)
             let panel = handle
                 .get_webview_panel(CLIPBOARD_PREVIEW_WINDOW_LABEL)
                 .map_err(|e| anyhow::anyhow!("preview panel not found: {e:?}"))?;
-            panel.set_ignores_mouse_events(true);
             panel.set_level(PanelLevel::Status.value());
             panel.show();
             Ok(())
@@ -983,5 +1398,132 @@ mod tests {
         assert_eq!(source.top, 191.5);
         assert_eq!(source.width, 120.0);
         assert_eq!(source.height, PREVIEW_POINTER_ANCHOR_SIZE);
+    }
+
+    #[test]
+    fn physical_bounds_maps_local_logical_rect_to_screen_pixels() {
+        let bounds = physical_bounds(
+            PreviewRect {
+                left: 10.0,
+                top: 20.0,
+                width: 100.0,
+                height: 50.0,
+            },
+            2.0,
+            300,
+            150,
+        );
+
+        // 逻辑 (10,20)-(110,70) → 物理 (320,190)-(520,290)，再外扩 4 逻辑 px（=8 物理 px）。
+        assert_eq!(bounds.left, 312);
+        assert_eq!(bounds.top, 182);
+        assert_eq!(bounds.right, 528);
+        assert_eq!(bounds.bottom, 298);
+    }
+
+    #[test]
+    fn physical_bounds_handles_fractional_scale_and_negative_origin() {
+        let bounds = physical_bounds(
+            PreviewRect {
+                left: 4.0,
+                top: 4.0,
+                width: 40.0,
+                height: 40.0,
+            },
+            1.25,
+            -100,
+            -50,
+        );
+
+        assert_eq!(bounds.left, -100);
+        assert_eq!(bounds.top, -50);
+        assert_eq!(bounds.right, -40);
+        assert_eq!(bounds.bottom, 10);
+    }
+
+    #[test]
+    fn hit_bounds_use_half_open_range() {
+        let bounds = physical_bounds(
+            PreviewRect {
+                left: 0.0,
+                top: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+            1.0,
+            0,
+            0,
+        );
+
+        // 外扩后逻辑 (-4,-4)-(14,14)：左/上闭、右/下开。
+        assert!(bounds.contains(-4, -4));
+        assert!(bounds.contains(13, 13));
+        assert!(!bounds.contains(-5, 0));
+        assert!(!bounds.contains(14, 8));
+        assert!(!bounds.contains(8, 14));
+    }
+
+    #[test]
+    fn zero_scale_factor_falls_back_to_one() {
+        let bounds = physical_bounds(
+            PreviewRect {
+                left: 0.0,
+                top: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+            0.0,
+            0,
+            0,
+        );
+
+        assert_eq!(bounds.left, -4);
+        assert_eq!(bounds.right, 14);
+    }
+
+    #[test]
+    fn rejects_non_finite_or_degenerate_rects() {
+        assert!(is_valid_rect(PreviewRect {
+            left: 0.0,
+            top: 0.0,
+            width: 10.0,
+            height: 10.0,
+        }));
+        assert!(!is_valid_rect(PreviewRect {
+            left: f64::NAN,
+            top: 0.0,
+            width: 10.0,
+            height: 10.0,
+        }));
+        assert!(!is_valid_rect(PreviewRect {
+            left: 0.0,
+            top: 0.0,
+            width: 0.0,
+            height: 10.0,
+        }));
+    }
+
+    /// Quartz 的全局显示坐标是点，需按 overlay 显示器原点与缩放换算成物理像素；
+    /// 该换算只在 macOS 参与编译，Windows 上无法验证真机行为，先把纯数学锁住。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn screen_points_to_physical_scales_relative_to_overlay_origin() {
+        // 主屏（原点 0,0）scale 2。
+        assert_eq!(
+            screen_points_to_physical(300.0, 200.0, 0, 0, 2.0),
+            (600, 400)
+        );
+
+        // overlay 在主屏右侧（物理 2880 = 1440pt，自身 scale 2）：点坐标先减 1440pt 再乘缩放。
+        assert_eq!(
+            screen_points_to_physical(1500.0, 100.0, 2880, 0, 2.0),
+            (3000, 200)
+        );
+
+        // 副屏在主屏上方（物理 y 为负，原点 -900 物理 = -600pt）。
+        assert_eq!(
+            screen_points_to_physical(500.0, 100.0, 0, -900, 1.5),
+            (750, 150)
+        );
     }
 }

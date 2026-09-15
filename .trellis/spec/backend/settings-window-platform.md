@@ -194,6 +194,118 @@ Correct:
 if (event.payload.label !== WINDOW_LABEL.CLIPBOARD) return;
 ```
 
+## Preview Panel Interactive Mode
+
+`clipboard-preview` is a full-screen transparent overlay window. It starts fully
+click-through (`set_ignore_cursor_events(true)`) so the desktop and the clipboard
+window below it stay usable, but it must become mouse-interactive while the
+pointer rests on the panel — otherwise the panel cannot be scrolled or
+drag-selected, and it closes 240ms after the pointer leaves the list.
+
+### 1. Scope / Trigger
+
+Touching preview pointer handling, panel hit testing, or fragment copy. The
+mechanism spans `window/preview.rs`, `mouse/windows.rs`, `commands/window.rs`,
+`src/pages/Preview/`, and `src/pages/Clipboard/`.
+
+### 2. Signatures
+
+- Events (Rust constant + `src/constants/events.ts`):
+  - `preview://pointer` `{ inside: boolean }` — emitted by Rust, consumed by the
+    preview page (expand/collapse) and the clipboard window (hover-hide buffer).
+  - `preview://selection` `{ text: string | null }` — emitted by the preview page
+    to the clipboard window; drives Ctrl/Cmd+C arbitration.
+- Commands:
+  - `set_clipboard_preview_panel_rect(rect: PreviewRect) -> ()`
+  - `set_clipboard_preview_pointer(inside: boolean) -> ()`
+  - `write_text_to_clipboard(text: string) -> ()`
+- Payload: `ClipboardPreviewPayload.filesPreviewKind` mirrors the list card's
+  `FilesPreviewKind` (single existing image file -> `imagePreview`).
+
+### 3. Contracts
+
+- The panel's real size is computed in the frontend; Rust only knows the 480 box
+  from its own layout. Hit testing uses the reported rect and falls back to
+  `layout.panelRect` before the first report.
+- **The sampling thread only handles the enter direction.** Leave is driven by the
+  panel's `pointerleave`, because a drag-select routinely moves the pointer past
+  the panel edge; a sampling-driven leave would flip the panel back to
+  click-through mid-drag. Retargets use a full reconcile instead.
+- `pointerleave` reports nothing while `event.buttons !== 0`; `pointerup` reports
+  once so Rust can re-decide from the real cursor position (otherwise a release
+  outside the panel would leave it interactive forever).
+- `set_clipboard_preview_pointer(false)` re-runs the hit test rather than forcing
+  click-through, so the DOM and the rect never fight over a 1-4px ring.
+- A preview show resets pointer state and sets click-through; a retarget keeps the
+  current pointer state so an in-progress selection is not interrupted.
+- The clipboard window must **not** close the preview on `window.blur` or
+  `window.resize` while the pointer is on the panel. Clicking an interactive
+  overlay moves focus off `clipboard`, so the main window observes the same blur a
+  real focus loss produces; without the guard, clicking the panel closes the
+  preview under the pointer. `useClipboardPreviewController.ts` guards both
+  handlers with `panelPointerInsideRef` (skips are logged as
+  `preview blur|resize ignored`). Pointer leaving the panel still ends the
+  preview through the normal 240ms buffer.
+- `preview close requested: reason=…, pointer_inside=…` is the authoritative
+  "why did the preview close" line; treat a `windowBlur` close with
+  `pointer_inside=true` as a guard regression, not a pointer-tracking failure.
+- `write_text_to_clipboard` deliberately does **not** arm `WritebackGuard`: the
+  fragment is expected to come back through the OS watcher as a new item.
+- Ctrl/Cmd+C priority in `List.tsx`: native copy (focused editable / window
+  selection) -> preview fragment -> copy the active item. The Windows Ctrl
+  whitelist already contains `C`, so no hook change is needed.
+- The panel has two mouse copy entries and they must stay in that shape: the
+  always-visible header button copies the **whole record** through
+  `writeToClipboard` (reusing default copy format, copy-then-hide, and reuse
+  counting), while the button floating next to a selection copies the **fragment**
+  through `writeTextToClipboard` (which intentionally skips `WritebackGuard`).
+- The preview window's own antd message context is separate from the clipboard
+  window's; in-preview copies pass `silent` so only the button's checkmark is
+  shown.
+- Rich text renders in a setup with `sandbox=""` (no `allow-same-origin`), so the
+  parent cannot read its selection. Drag-select copy is limited to plain text,
+  Markdown, and file rows; whole-item copy still works.
+
+### 4. Validation & Error Matrix
+
+- Stale `preview://pointer` constant -> panel never expands and hover-close is
+  never cancelled.
+- Missing panel-rect report -> hit testing falls back to the 480 box, so the
+  pointer can be considered "inside" next to a short panel.
+- Hit-rect padding too large -> a ring outside the panel where sampling says
+  inside and the DOM says outside, so the preview stays open on a click-through
+  overlay.
+- Arming `WritebackGuard` for fragments -> the new item never appears in history.
+- Missing the blur/resize guard -> the panel expands and tracks the pointer
+  correctly, but one click on it closes the preview
+  (`reason=windowBlur, pointer_inside=true`).
+- Silent skip in that guard -> the log cannot tell "user did not click" from
+  "click handled"; keep the debug line and the Rust
+  `clipboard fragment written: chars=N` line so the copy path stays traceable.
+
+### 5. Good/Base/Bad Cases
+
+- Good: pointer enters the panel, preview stays, panel grows to the overlay inset,
+  long text scrolls, selection can be copied.
+- Base: pointer never enters the panel; the preview closes on the existing 240ms
+  buffer.
+- Bad: flipping `set_ignore_cursor_events(false)` for the whole overlay on every
+  preview show, or forcing click-through inside `prepare_preview_window_for_show`
+  (interrupts an in-progress selection on retarget).
+
+### 6. Tests Required
+
+- `cargo test window::preview` covers logical -> physical hit-rect mapping
+  (multi-monitor origin, fractional scale, half-open bounds) and macOS point ->
+  pixel conversion.
+- `pnpm lint` and `pnpm tsc`.
+- Manual: hover to preview, move onto the panel (keeps + grows + scrolls),
+  drag-select, copy fragment (new history row, clipboard equals fragment), Ctrl+C
+  with and without a selection, click on the panel (clipboard window **and**
+  preview stay), click outside (clipboard window hides and preview closes),
+  Space preview. macOS needs real hardware: the branch cannot be compiled on a
+  Windows host.
+
 ## Pending-Slot Pattern
 
 When an event targets a destroyable preference window, use a Rust pending slot

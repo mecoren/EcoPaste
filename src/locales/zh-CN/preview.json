@@ -1,4 +1,8 @@
 {
+  "copy": {
+    "item": "复制整条内容",
+    "itemCopied": "已复制"
+  },
   "empty": {
     "content": "暂无预览内容",
     "files": "无文件路径",
@@ -23,6 +27,10 @@
   "rich": {
     "frameTitle": "富文本预览",
     "tooLarge": "内容过大，按纯文本显示"
+  },
+  "selection": {
+    "copied": "已复制选中内容",
+    "copy": "复制选中内容"
   },
   "text": {
     "markdownView": "MD",

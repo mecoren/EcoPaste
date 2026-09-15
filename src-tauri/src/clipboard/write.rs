@@ -43,6 +43,18 @@ pub fn write_to_clipboard(
     Ok(())
 }
 
+/// 把任意纯文本写入系统剪贴板（悬浮预览的「复制选中片段」路径）。
+///
+/// 与 [`write_to_clipboard`] 的关键差别：**不登记** [`WritebackGuard`]。片段复制的产品语义
+/// 就是「让这段文字作为一条新记录进入历史」，因此期望 OS 监听管线读到并入库；
+/// 登记回环抑制反而会把这次真实复制吞掉。
+pub fn write_plain_text(text: &str) -> Result<()> {
+    let ctx = ClipboardContext::new().map_err(clip_err)?;
+    ctx.set_text(text.to_owned()).map_err(clip_err)?;
+
+    Ok(())
+}
+
 fn write_text(
     ctx: &ClipboardContext,
     guard: &WritebackGuard,

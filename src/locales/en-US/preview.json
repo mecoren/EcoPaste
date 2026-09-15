@@ -1,4 +1,8 @@
 {
+  "copy": {
+    "item": "Copy item",
+    "itemCopied": "Copied"
+  },
   "empty": {
     "content": "No preview content",
     "files": "No file paths",
@@ -23,6 +27,10 @@
   "rich": {
     "frameTitle": "Rich text preview",
     "tooLarge": "Content too large, showing as plain text"
+  },
+  "selection": {
+    "copied": "Selection copied",
+    "copy": "Copy selection"
   },
   "text": {
     "markdownView": "MD",

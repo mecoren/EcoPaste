@@ -1,0 +1,7 @@
+{"file": "AGENTS.md", "reason": "项目级权威约定：Rust-First 边界、跨端字面量集中维护、前端样式/状态规范、提交信息格式"}
+{"file": ".trellis/spec/backend/index.md", "reason": "后端质量校验基线（cargo fmt/clippy/test）与分层归属核对"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "前端质量校验基线（pnpm lint / tsc、手动走查要求）"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "前端质量检查清单：类型、无裸 console、UnoCSS 与 antd token 约束"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "复用检查：确认新按钮/新命令没有重复既有实现"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "跨层一致性检查：事件名/命令名/payload 字段在 Rust 与前端两侧同步"}
+{"file": ".trellis/spec/backend/settings-window-platform.md", "reason": "核对 Ctrl 白名单契约未被改动、窗口隐藏链路（外部点击/失焦）无回归"}

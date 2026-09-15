@@ -56,7 +56,7 @@ export function clearHoverTimer(timerRef: { current: number | null }) {
  */
 export async function closeClipboardPreviewSilently(reason: string) {
   try {
-    await closeClipboardPreview();
+    await closeClipboardPreview(reason);
   } catch (error) {
     log.error("close clipboard preview failed", { error, reason });
   }

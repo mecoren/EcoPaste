@@ -1,0 +1,11 @@
+{"file": "AGENTS.md", "reason": "项目单一真相源：Rust-First 边界、目录约定、事件/命令常量集中维护、前端样式与状态约定、常用校验命令"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Rust 侧分层与质量校验基线的入口索引"}
+{"file": ".trellis/spec/backend/commands-and-events.md", "reason": "新增 tauri command、事件名、命令包装与错误序列化的契约"}
+{"file": ".trellis/spec/backend/clipboard-pipeline.md", "reason": "剪贴板写回、回环抑制、预览/列表 payload 预处理字段的所有权约定"}
+{"file": ".trellis/spec/backend/settings-window-platform.md", "reason": "窗口 label、窗口生命周期、Windows 低级键盘钩子白名单、macOS/Windows 平台分支契约"}
+{"file": ".trellis/spec/backend/architecture.md", "reason": "窗口/剪贴板模块职责边界，确认新逻辑落在 window/preview.rs 与 clipboard/write.rs"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "前端分层与校验基线入口索引"}
+{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "组件写法、antd v6 用法、UnoCSS token 类、字号与尺寸规范（选区配色与浮动按钮）"}
+{"file": ".trellis/spec/frontend/hook-guidelines.md", "reason": "自定义 hook、useEffect/useMount 分工、事件监听清理约定（预览交互层与选区监听）"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Valtio 只存 UI 状态、跨窗口事件协作态如何处理"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "跨 Rust/前端改动的一致性检查清单（事件名、命令名、payload 字段双向同步）"}

@@ -22,7 +22,7 @@ use crate::db::items::{
 };
 use crate::db::models::{
     ClipboardAction, ClipboardApp, ClipboardGroup, ClipboardItem, ClipboardItemPage,
-    ClipboardItemQuery, ClipboardKind, ClipboardSubKind, FileEntry, Platform,
+    ClipboardItemQuery, ClipboardKind, ClipboardSubKind, FileEntry, FilesPreviewKind, Platform,
 };
 use crate::db::DatabaseState;
 use crate::settings::{RichTextMode, SettingsStore};
@@ -301,6 +301,9 @@ pub struct ClipboardPreviewPayload {
     pub image_exists: bool,
     pub files: Vec<ClipboardPreviewFileEntry>,
     pub total_files: usize,
+    /// Files 预览的渲染模式：与列表卡片同判据（单文件 + 是图片 + 文件存在 → 按图片渲染），
+    /// 前端据此决定走图片分支还是文件行列表。
+    pub files_preview_kind: FilesPreviewKind,
 }
 
 /// 预览窗口里的单个文件条目，比列表卡片保留更多文件并带上 size。
@@ -403,6 +406,38 @@ pub async fn write_to_clipboard(
     mark_item_reused_if_enabled(&app, &pool, &id, item.kind).await?;
 
     if hide_after_copy {
+        hide_clipboard_window_after_copy(&app);
+    }
+
+    Ok(())
+}
+
+/// 把任意纯文本写入系统剪贴板（悬浮预览的「复制选中片段」）。
+///
+/// 与 [`write_to_clipboard`] 的差别：不按记录 id 写回，也不登记回环抑制——
+/// 期望 OS 监听管线读到这段文本后按既有去重 / 搜索语义入库成一条新记录。
+/// 复制后是否隐藏窗口与整条复制保持一致（尊重 `copy_then_hide_window` 与 pin 状态）。
+#[tauri::command]
+pub async fn write_text_to_clipboard(app: AppHandle, text: String) -> Result<()> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::Clipboard("clipboard text is empty".to_owned()));
+    }
+
+    crate::clipboard::write_plain_text(trimmed)?;
+
+    log::info!(
+        "clipboard fragment written: chars={}",
+        trimmed.chars().count()
+    );
+
+    if app
+        .state::<SettingsStore>()
+        .snapshot()
+        .clipboard
+        .content
+        .copy_then_hide_window
+    {
         hide_clipboard_window_after_copy(&app);
     }
 
@@ -1169,9 +1204,19 @@ async fn build_clipboard_preview_payload(
         size: item.size,
         is_sensitive: item.is_sensitive,
         image_exists,
+        files_preview_kind: resolve_preview_files_kind(&files),
         files,
         total_files,
     })
+}
+
+/// 预览面板的文件渲染模式：与列表卡片（`attach_file_entries`）保持同一判据，
+/// 避免同一个条目在卡片与预览面板里出现不同形态。
+fn resolve_preview_files_kind(files: &[ClipboardPreviewFileEntry]) -> FilesPreviewKind {
+    match files {
+        [only] if only.is_image && only.exists => FilesPreviewKind::ImagePreview,
+        _ => FilesPreviewKind::List,
+    }
 }
 
 /// 解析 files 类型记录中的路径列表，最多返回前 64 项以控制 IPC 与 icon 抽取成本。

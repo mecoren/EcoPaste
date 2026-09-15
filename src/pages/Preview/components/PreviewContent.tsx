@@ -1,14 +1,16 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { useUnmount } from "ahooks";
 import { Image as AntImage, Empty } from "antd";
 import type { TFunction } from "i18next";
 import type { FC } from "react";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Virtuoso } from "react-virtuoso";
 import { useSnapshot } from "valtio";
-import type {
-  ClipboardPreviewFileEntry,
-  ClipboardPreviewPayload,
+import {
+  type ClipboardPreviewFileEntry,
+  type ClipboardPreviewPayload,
+  writeToClipboard,
 } from "@/commands";
 import AssetImage from "@/components/AssetImage";
 import VirtuosoScroller, {
@@ -16,7 +18,10 @@ import VirtuosoScroller, {
 } from "@/components/VirtuosoScroller";
 import { settingsState } from "@/stores/settings";
 import { cn } from "@/utils/cn";
-import { PREVIEW_TEXT_SOFT_WRAP_CHARS } from "../constants";
+import {
+  PREVIEW_COPY_FEEDBACK_MS,
+  PREVIEW_TEXT_SOFT_WRAP_CHARS,
+} from "../constants";
 import MarkdownPreview from "./MarkdownPreview";
 import RichTextViewer from "./RichTextViewer";
 
@@ -36,6 +41,18 @@ interface FilePreviewRowProps {
   file: ClipboardPreviewFileEntry;
 }
 
+interface ImageStageProps {
+  alt: string;
+  /** 面板内渲染用的图片路径（本地绝对路径或托管预览档）。 */
+  src: string;
+  /** 灯箱加载的原图路径；缺失时退回 `src`。 */
+  originSrc?: string | null;
+  width?: number;
+  height?: number;
+  /** 图片解析失败（webview 不支持的格式 / 文件不可读）时通知调用方降级。 */
+  onError?: () => void;
+}
+
 const TEXT_VIRTUOSO_COMPONENTS = {
   Footer: PreviewTextPadding,
   Header: PreviewTextPadding,
@@ -48,14 +65,49 @@ const FILES_VIRTUOSO_COMPONENTS = {
 
 /**
  * Content Viewer 顶部元信息区。
+ * 右侧复制按钮是预览面板内的纯鼠标复制入口（复制整条记录）；片段复制走选区浮动按钮。
  */
 export const PreviewHeader: FC<PreviewHeaderProps> = (props) => {
   const { payload } = props;
   const { t } = useTranslation(["preview", "clipboard"]);
+  const [copied, setCopied] = useState(false);
+  const feedbackTimerRef = useRef<number | null>(null);
   const title = payload ? previewTitle(t, payload) : t("title.loading");
   const meta = payload ? previewMeta(t, payload) : t("meta.contentViewer");
   const typeKey = payload ? (payload.subKind ?? payload.kind) : null;
   const typeLabel = typeKey ? t(`clipboard:types.${typeKey}`) : "";
+
+  useUnmount(cancelFeedback);
+
+  /**
+   * 复制整条记录：与列表里的「复制」同一条命令，默认复制格式与「复制后隐藏窗口」
+   * 设置全部复用；只在预览窗内静默 —— 按钮自身对勾已是反馈，否则两个窗口各飘一条 toast。
+   */
+  const handleCopy = async () => {
+    if (!payload) return;
+
+    cancelFeedback();
+    setCopied(true);
+
+    try {
+      await writeToClipboard(payload.id, false, { silent: true });
+    } catch {
+      setCopied(false);
+      return;
+    }
+
+    feedbackTimerRef.current = window.setTimeout(() => {
+      feedbackTimerRef.current = null;
+      setCopied(false);
+    }, PREVIEW_COPY_FEEDBACK_MS);
+  };
+
+  function cancelFeedback() {
+    if (feedbackTimerRef.current === null) return;
+
+    window.clearTimeout(feedbackTimerRef.current);
+    feedbackTimerRef.current = null;
+  }
 
   return (
     <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-ant-border border-b px-4">
@@ -64,11 +116,31 @@ export const PreviewHeader: FC<PreviewHeaderProps> = (props) => {
         <div className="truncate text-ant-secondary text-xs">{meta}</div>
       </div>
 
-      {payload && (
-        <span className="shrink-0 rounded-1 bg-ant-fill-secondary px-2 py-0.5 text-ant-secondary text-xs">
-          {typeLabel}
-        </span>
-      )}
+      <div className="flex shrink-0 items-center gap-2">
+        {payload && (
+          <span className="rounded-1 bg-ant-fill-secondary px-2 py-0.5 text-ant-secondary text-xs">
+            {typeLabel}
+          </span>
+        )}
+
+        {payload && (
+          <button
+            aria-label={t("copy.item")}
+            className={cn(
+              "flex size-6 cursor-pointer items-center justify-center rounded-1 text-ant-secondary transition-colors hover:text-ant-text",
+              { "text-ant-primary": copied },
+            )}
+            onClick={handleCopy}
+            title={copied ? t("copy.itemCopied") : t("copy.item")}
+            type="button"
+          >
+            <i
+              aria-hidden="true"
+              className={copied ? "i-lucide:check" : "i-lucide:copy"}
+            />
+          </button>
+        )}
+      </div>
     </div>
   );
 };
@@ -128,7 +200,7 @@ const TextViewer: FC<PayloadViewerProps> = (props) => {
   if (renderMarkdown) {
     return (
       <div className="flex h-full min-h-0 flex-col">
-        <div className="flex shrink-0 justify-end gap-1 border-ant-border border-b px-4 py-1">
+        <div className="flex shrink-0 select-none justify-end gap-1 border-ant-border border-b px-4 py-1">
           <button
             className={cn(
               "rounded-1 px-1.5 text-ant-secondary text-xs transition-colors hover:text-ant-text",
@@ -215,12 +287,6 @@ const PlainTextViewer: FC<{ text: string }> = (props) => {
 const ImageViewer: FC<PayloadViewerProps> = (props) => {
   const { payload } = props;
   const { t } = useTranslation("preview");
-  const [lightboxOpen, setLightboxOpen] = useState(false);
-  const imageWidth = payload.imageWidth ?? void 0;
-  const imageHeight = payload.imageHeight ?? void 0;
-  const lightboxSrc = payload.imageOriginPath ?? payload.imagePath;
-  // antd Image 不走 AssetImage 的 convertFileSrc 封装，这里手动转。
-  const lightboxUrl = lightboxSrc ? convertFileSrc(lightboxSrc) : void 0;
 
   if (!payload.imagePath || !payload.imageExists) {
     return (
@@ -232,6 +298,27 @@ const ImageViewer: FC<PayloadViewerProps> = (props) => {
       </div>
     );
   }
+
+  return (
+    <ImageStage
+      alt={t("image.alt")}
+      height={payload.imageHeight ?? void 0}
+      originSrc={payload.imageOriginPath}
+      src={payload.imagePath}
+      width={payload.imageWidth ?? void 0}
+    />
+  );
+};
+
+/**
+ * 图片展示台：`image` 条目与「单图文件」共用同一套渲染与灯箱。
+ * `src` 走 `AssetImage`（内部 `convertFileSrc`），灯箱需要自己把路径转成可加载 URL。
+ */
+const ImageStage: FC<ImageStageProps> = (props) => {
+  const { alt, height, onError, originSrc, src, width } = props;
+  const [lightboxOpen, setLightboxOpen] = useState(false);
+  const lightboxSrc = originSrc ?? src;
+  const lightboxUrl = lightboxSrc ? convertFileSrc(lightboxSrc) : void 0;
 
   /**
    * 点击图片展开灯箱；button 原生 Enter / Space 同效（预览窗 focusable=false，
@@ -246,18 +333,19 @@ const ImageViewer: FC<PayloadViewerProps> = (props) => {
       {/* AssetImage 自身 pointer-events-none（防 hover 干扰），点击目标放外层。 */}
       <button className="cursor-zoom-in" onClick={openLightbox} type="button">
         <AssetImage
-          alt={t("image.alt")}
+          alt={alt}
           className="h-auto max-h-full max-w-full object-contain"
           draggable={false}
-          height={imageHeight}
-          src={payload.imagePath}
-          width={imageWidth}
+          height={height}
+          onError={onError}
+          src={src}
+          width={width}
         />
       </button>
 
       {/* 隐藏承载节点：只为 antd 灯箱提供原图 src 与受控开关，面板内不渲染。 */}
       <AntImage
-        alt={t("image.alt")}
+        alt={alt}
         hidden
         preview={{
           onOpenChange: (open) => {
@@ -273,11 +361,29 @@ const ImageViewer: FC<PayloadViewerProps> = (props) => {
 };
 
 /**
- * 文件预览：虚拟列表展示路径、文件名、存在状态与基础大小。
+ * 文件预览：单图文件直接按图片渲染（与列表卡片同判据，由 Rust 算好 `filesPreviewKind`），
+ * 其余情况走虚拟列表展示路径、文件名、存在状态与基础大小。
  */
 const FilesViewer: FC<PayloadViewerProps> = (props) => {
   const { payload } = props;
   const { t } = useTranslation("preview");
+  // 图片解析失败（webview 不支持的格式 / 文件不可读）时退回文件行列表。
+  const [imageBroken, setImageBroken] = useState(false);
+
+  if (payload.filesPreviewKind === "imagePreview" && !imageBroken) {
+    const [imageEntry] = payload.files;
+
+    if (imageEntry) {
+      return (
+        <ImageStage
+          alt={t("image.alt")}
+          onError={handleImageError}
+          originSrc={imageEntry.path}
+          src={imageEntry.path}
+        />
+      );
+    }
+  }
 
   if (payload.files.length === 0) {
     return (
@@ -315,6 +421,10 @@ const FilesViewer: FC<PayloadViewerProps> = (props) => {
 
   function computeFileRowKey(index: number) {
     return payload.files[index]?.path ?? index;
+  }
+
+  function handleImageError() {
+    setImageBroken(true);
   }
 
   function renderFileRow(index: number) {

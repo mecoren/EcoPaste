@@ -30,6 +30,8 @@ export const PREVIEW_SPRING = {
   stiffness: 420,
 };
 export const PREVIEW_EXIT_ANIMATION_MS = 160;
+/** 复制按钮成功后的对勾停留时长（面板头部与选区浮动按钮共用）。 */
+export const PREVIEW_COPY_FEEDBACK_MS = 1000;
 export const PREVIEW_PANEL_TRANSITION = {
   duration: 0.18,
   ease: [0.22, 1, 0.36, 1],

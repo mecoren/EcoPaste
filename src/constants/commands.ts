@@ -70,6 +70,8 @@ export const TAURI_COMMAND = {
   SET_AUTOSTART: "set_autostart",
   SET_CLIPBOARD_ITEMS_FAVORITE: "set_clipboard_items_favorite",
   SET_CLIPBOARD_ITEMS_PINNED: "set_clipboard_items_pinned",
+  SET_CLIPBOARD_PREVIEW_PANEL_RECT: "set_clipboard_preview_panel_rect",
+  SET_CLIPBOARD_PREVIEW_POINTER: "set_clipboard_preview_pointer",
   SET_CLIPBOARD_WINDOW_AUTO_HIDE_SUSPENDED:
     "set_clipboard_window_auto_hide_suspended",
   SET_CLIPBOARD_WINDOW_EDITING: "set_clipboard_window_editing",
@@ -94,6 +96,7 @@ export const TAURI_COMMAND = {
   UPDATE_CLIPBOARD_ITEM_NOTE: "update_clipboard_item_note",
   UPDATE_CLIPBOARD_ITEM_TEXT: "update_clipboard_item_text",
   UPDATE_SETTINGS: "update_settings",
+  WRITE_TEXT_TO_CLIPBOARD: "write_text_to_clipboard",
   WRITE_TO_CLIPBOARD: "write_to_clipboard",
 } as const;
 

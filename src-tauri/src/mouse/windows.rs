@@ -90,6 +90,7 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
 
         if !menu_handled
             && window::should_auto_hide_clipboard_window()
+            && !preview_panel_contains(cursor)
             && cursor_outside_clipboard_window(app, cursor)
         {
             schedule_hide(app);
@@ -98,6 +99,13 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
 
     // 不吞键：用户的点击应该正常落到目标窗口。
     CallNextHookEx(null_mut(), code, wparam, lparam)
+}
+
+/// 预览面板内的点击视作「内部点击」：面板可交互后，点击面板用于滚动 / 拖选，
+/// 不该被判定成外部点击去隐藏主窗——主窗隐藏会连带 `suppress_for_clipboard_hide` 收起预览。
+/// 判定走预览模块的缓存物理边界，钩子线程内不做分配。
+fn preview_panel_contains(cursor: POINT) -> bool {
+    crate::window::preview::panel_contains_physical_point(cursor.x, cursor.y)
 }
 
 fn cursor_outside_clipboard_window(app: &AppHandle, cursor: POINT) -> bool {

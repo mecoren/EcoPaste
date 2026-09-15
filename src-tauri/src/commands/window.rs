@@ -5,7 +5,7 @@ use crate::settings::WindowPosition;
 use crate::window;
 
 pub use window::lifecycle::LifecycleSnapshot;
-pub use window::preview::{ClipboardPreviewState, PreviewAnchorRect};
+pub use window::preview::{ClipboardPreviewState, PreviewAnchorRect, PreviewRect};
 
 #[tauri::command]
 pub async fn show_window(app: AppHandle, label: String) -> Result<()> {
@@ -131,12 +131,34 @@ pub async fn show_clipboard_preview(
     window::preview::show_clipboard_preview(&app, item_id, anchor)
 }
 
+/// 关闭预览 overlay。`reason` 是前端侧关闭路径的标识，落进 Rust 日志便于回溯
+/// 「预览为什么自己关了」（前端日志不会写进本地日志文件）。
 #[tauri::command]
-pub async fn close_clipboard_preview(app: AppHandle) -> Result<()> {
-    window::preview::close_clipboard_preview(&app)
+pub async fn close_clipboard_preview(app: AppHandle, reason: Option<String>) -> Result<()> {
+    let reason = reason.unwrap_or_else(|| "unspecified".to_owned());
+
+    window::preview::close_clipboard_preview(&app, &reason)
 }
 
 #[tauri::command]
 pub async fn get_clipboard_preview_state() -> Result<Option<ClipboardPreviewState>> {
     window::preview::get_clipboard_preview_state()
+}
+
+/// 预览面板实测矩形上报：面板尺寸由前端按内容与交互态动态计算，
+/// Rust 只有本次 layout 的 480 框，命中判定以前端实测值为准。
+#[tauri::command]
+pub async fn set_clipboard_preview_panel_rect(rect: PreviewRect) -> Result<()> {
+    window::preview::update_panel_rect(rect);
+
+    Ok(())
+}
+
+/// 预览面板指针进出的即时回报（面板 `pointerenter` / `pointerleave`）。
+/// 离开方向不能等 Rust 的采样周期：翻转期间整个全屏 overlay 都在接收鼠标事件。
+#[tauri::command]
+pub async fn set_clipboard_preview_pointer(app: AppHandle, inside: bool) -> Result<()> {
+    window::preview::report_pointer_inside(&app, inside);
+
+    Ok(())
 }

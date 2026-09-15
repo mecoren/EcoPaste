@@ -26,23 +26,30 @@ import type { PreviewMeasuredSize } from "./measurement";
 
 /**
  * 图片 payload 已有 DB 尺寸时，直接按比例估算面板尺寸，避免等图片加载后才撑开。
+ * `maxHeight` 为面板高度上限：指针停在面板上时前端把它抬到 overlay 可用高度，
+ * 让超长内容能滚动看完（短内容仍是自然高度，不会撑出空白）。
  */
 export function resolveEffectivePanelSize(
   layout: ClipboardPreviewState["layout"],
   measuredSize: PreviewMeasuredSize,
   payload: ClipboardPreviewPayload | null,
+  maxHeight = PREVIEW_PANEL_MAX_HEIGHT,
 ): PreviewMeasuredSize {
   if (!payload) return measuredSize;
 
   if (payload.kind === "text") {
-    return resolveTextPanelSize(layout, payload.text ?? "");
+    return resolveTextPanelSize(layout, payload.text ?? "", maxHeight);
   }
 
   if (payload.kind === "files") {
+    // 单图文件按图片渲染：没有 DB 尺寸可估，交给隐藏测量层给出自然尺寸。
+    if (payload.filesPreviewKind === "imagePreview") return measuredSize;
+
     return resolveFilesPanelSize(
       layout,
       payload.files.length,
       payload.totalFiles,
+      maxHeight,
     );
   }
 
@@ -52,6 +59,7 @@ export function resolveEffectivePanelSize(
     layout,
     payload.imageWidth,
     payload.imageHeight,
+    maxHeight,
   );
   if (!imageSize) return measuredSize;
 
@@ -64,6 +72,7 @@ export function resolveEffectivePanelSize(
 export function resolveDynamicPanelRect(
   layout: ClipboardPreviewState["layout"],
   measuredSize: PreviewMeasuredSize,
+  maxHeight = PREVIEW_PANEL_MAX_HEIGHT,
 ) {
   const width = clamp(
     measuredSize.width,
@@ -73,11 +82,28 @@ export function resolveDynamicPanelRect(
   const height = clamp(
     measuredSize.height,
     PREVIEW_PANEL_MIN_HEIGHT,
-    Math.min(PREVIEW_PANEL_MAX_HEIGHT, layout.panelRect.height),
+    resolvePanelHeightCap(layout, maxHeight),
   );
   const raw = rawDynamicPanelRect(layout, width, height);
 
   return clampRect(raw, insetRect(layout.overlayRect, PREVIEW_PANEL_MARGIN));
+}
+
+/**
+ * 面板高度上限：取入参上限与「overlay 去掉上下安全边距后的高度」的较小值。
+ * Rust 给的 `panelRect` 是固定的 480 框、不携带 placement 信息，故这里直接用 overlay 边界，
+ * 放大方向由 `rawDynamicPanelRect` 天然背向 source。
+ */
+function resolvePanelHeightCap(
+  layout: ClipboardPreviewState["layout"],
+  maxHeight: number,
+) {
+  const overlayLimit = Math.max(
+    PREVIEW_PANEL_MIN_HEIGHT,
+    layout.overlayRect.height - PREVIEW_PANEL_MARGIN * 2,
+  );
+
+  return Math.min(maxHeight, overlayLimit);
 }
 
 /**
@@ -158,6 +184,7 @@ function resolveImagePanelSize(
   layout: ClipboardPreviewState["layout"],
   imageWidth: number | null,
   imageHeight: number | null,
+  maxHeight: number,
 ): PreviewMeasuredSize | null {
   if (!imageWidth || !imageHeight || imageWidth <= 0 || imageHeight <= 0) {
     return null;
@@ -167,10 +194,7 @@ function resolveImagePanelSize(
     PREVIEW_PANEL_MAX_WIDTH,
     layout.panelRect.width,
   );
-  const maxPanelHeight = Math.min(
-    PREVIEW_PANEL_MAX_HEIGHT,
-    layout.panelRect.height,
-  );
+  const maxPanelHeight = resolvePanelHeightCap(layout, maxHeight);
   const maxImageWidth = Math.max(
     1,
     maxPanelWidth - PREVIEW_PANEL_IMAGE_PADDING_X,
@@ -209,15 +233,13 @@ function resolveImagePanelSize(
 function resolveTextPanelSize(
   layout: ClipboardPreviewState["layout"],
   text: string,
+  maxHeight: number,
 ): PreviewMeasuredSize {
   const maxPanelWidth = Math.min(
     PREVIEW_PANEL_MAX_WIDTH,
     layout.panelRect.width,
   );
-  const maxPanelHeight = Math.min(
-    PREVIEW_PANEL_MAX_HEIGHT,
-    layout.panelRect.height,
-  );
+  const maxPanelHeight = resolvePanelHeightCap(layout, maxHeight);
   const rowCount = countTextPreviewRows(text);
   const contentHeight =
     rowCount === 0
@@ -241,15 +263,13 @@ function resolveFilesPanelSize(
   layout: ClipboardPreviewState["layout"],
   shownCount: number,
   totalCount: number,
+  maxHeight: number,
 ): PreviewMeasuredSize {
   const maxPanelWidth = Math.min(
     PREVIEW_PANEL_MAX_WIDTH,
     layout.panelRect.width,
   );
-  const maxPanelHeight = Math.min(
-    PREVIEW_PANEL_MAX_HEIGHT,
-    layout.panelRect.height,
-  );
+  const maxPanelHeight = resolvePanelHeightCap(layout, maxHeight);
   const contentHeight =
     shownCount === 0
       ? PREVIEW_EMPTY_CONTENT_HEIGHT

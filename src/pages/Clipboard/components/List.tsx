@@ -30,6 +30,7 @@ import {
   toggleClipboardItemFavorite,
   toggleClipboardItemPinned,
   updateClipboardItemGroup,
+  writeTextToClipboard,
   writeToClipboard,
 } from "@/commands";
 import VirtuosoScroller, {
@@ -64,6 +65,7 @@ import type {
 import type { ItemAction } from "@/types/settings";
 import { cn } from "@/utils/cn";
 import { isMac } from "@/utils/is";
+import { log } from "@/utils/log";
 import type { WindowVisibilityPayload } from "../hooks/previewController";
 import {
   isSpaceKey,
@@ -138,6 +140,8 @@ const List: FC = () => {
   // MOD 键按下态直接写根节点 data 属性（TextCard 用属性选择器消费切链接态），
   // 不进 React state——避免 setState 引发全列表重渲染。
   const listRootRef = useRef<HTMLDivElement>(null);
+  // 预览面板里选中的片段（由 `preview://selection` 同步），Ctrl+C 的仲裁依据。
+  const previewSelectionRef = useRef<string | null>(null);
 
   const snapshot = useSnapshot(clipboardViewState);
   const settings = useSnapshot(settingsState);
@@ -249,6 +253,28 @@ const List: FC = () => {
   };
 
   useTauriListen(TAURI_EVENT.CLIPBOARD_GROUPS_UPDATED, handleGroupsUpdated);
+
+  /**
+   * 预览窗上报的「当前选中片段」镜像：有选中时 Ctrl/Cmd+C 复制片段，
+   * 无选中时维持「复制整条记录」的既有语义。
+   */
+  const handlePreviewSelection = (event: {
+    payload: { text: string | null };
+  }) => {
+    previewSelectionRef.current = event.payload.text;
+  };
+
+  useTauriListen<{ text: string | null }>(
+    TAURI_EVENT.PREVIEW_SELECTION,
+    handlePreviewSelection,
+  );
+
+  // 预览会话结束后清掉片段镜像，避免陈旧选区继续劫持 Ctrl/Cmd+C。
+  useEffect(() => {
+    if (previewSession !== null) return;
+
+    previewSelectionRef.current = null;
+  }, [previewSession]);
 
   /**
    * 收到剪贴板更新：仅在列表位于顶部时刷新；否则延后到用户回到顶部后再刷新，
@@ -947,6 +973,18 @@ const List: FC = () => {
       !shouldUseNativeCopy(event)
     ) {
       event.preventDefault();
+
+      // 预览面板里有选中片段时优先复制片段（片段会作为新记录入库）；
+      // 没有选中才回到「复制整条记录」的既有语义。
+      const selection = previewSelectionRef.current;
+
+      if (selection !== null) {
+        log.debug("ctrl+c copied preview selection", {
+          chars: selection.length,
+        });
+        void writeTextToClipboard(selection);
+        return;
+      }
 
       const activeItem = getActiveItem();
 

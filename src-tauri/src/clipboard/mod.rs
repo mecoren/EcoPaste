@@ -37,7 +37,7 @@ pub use storage::ImageStore;
 pub use watcher::{
     init, materialize_source, persist_and_notify, spawn_materialize_icon, WatcherPause,
 };
-pub use write::write_to_clipboard;
+pub use write::{write_plain_text, write_to_clipboard};
 
 #[cfg(test)]
 pub(crate) mod test_lock {
