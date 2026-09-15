@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.2.1](https://github.com/mecoren/EcoPaste/compare/v1.2.0...v1.2.1) (2026-09-15)
+
+### ✨ Features
+
+* custom preference window titlebar on Windows ([cc99305](https://github.com/mecoren/EcoPaste/commit/cc99305))
+
+### 🐛 Bug Fixes
+
+* bind dev server to IPv4 for tauri dev detection ([e77248f](https://github.com/mecoren/EcoPaste/commit/e77248f))
+* correct NSAttributedString usage for macOS rich text conversion ([fac8c5d](https://github.com/mecoren/EcoPaste/commit/fac8c5d))
+* replace memory metrics platform probes with sysinfo ([fb22dcf](https://github.com/mecoren/EcoPaste/commit/fb22dcf))
+
 ## [1.2.0](https://github.com/mecoren/EcoPaste/compare/v1.1.0...v1.2.0) (2026-09-14)
 
 ### ✨ Features

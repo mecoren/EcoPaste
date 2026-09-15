@@ -1,5 +1,17 @@
 # 更新日志
 
+## [1.2.1](https://github.com/mecoren/EcoPaste/compare/v1.2.0...v1.2.1) (2026-09-15)
+
+### ✨ 新功能
+
+* Windows 偏好设置窗口改用自定义标题栏，背景与侧边栏一致 ([cc99305](https://github.com/mecoren/EcoPaste/commit/cc99305))
+
+### 🐛 问题修复
+
+* 开发服务器绑定 IPv4，修复 tauri dev 启动探测失败 ([e77248f](https://github.com/mecoren/EcoPaste/commit/e77248f))
+* 修正 macOS 富文本转换中 NSAttributedString 的使用 ([fac8c5d](https://github.com/mecoren/EcoPaste/commit/fac8c5d))
+* 内存指标平台探测改用 sysinfo 实现 ([fb22dcf](https://github.com/mecoren/EcoPaste/commit/fb22dcf))
+
 ## [1.2.0](https://github.com/mecoren/EcoPaste/compare/v1.1.0...v1.2.0) (2026-09-14)
 
 ### ✨ 新功能
