@@ -405,6 +405,8 @@ const List: FC = () => {
   /**
    * 剪贴板窗口显隐变化：更新可见性镜像；显示时按偏好重置分组与滚动位置。
    * 可见性 ref 供 `handleClipboardUpdated` 判断是否处于冻结态——隐藏期间只记 pending，不立即 reload。
+   * reopen 时若有 pending 必补刷：preserve + 不回顶走静默刷新保位置，
+   * 开回顶则直刷不再经顶部状态门控。
    */
   const handleWindowVisibility = (event: {
     payload: WindowVisibilityPayload;
@@ -414,6 +416,10 @@ const List: FC = () => {
 
     clipboardWindowVisibleRef.current = visible;
     if (!visible) return;
+
+    // 同步快照：后续选择重置会写 clipboardViewState，其 snapshot-effect 会清
+    // pending，必须在写入前留存本次 show 该消费的版本。
+    const hadDeferred = deferredReloadRef.current;
 
     const {
       scrollToTopOnOpen,
@@ -425,7 +431,15 @@ const List: FC = () => {
       selectRangeOnOpen !== WINDOW_OPEN_SELECTION_PRESERVE ||
       selectCategoryOnOpen !== WINDOW_OPEN_SELECTION_PRESERVE ||
       selectGroupOnOpen !== WINDOW_OPEN_SELECTION_PRESERVE;
-    if (!scrollToTopOnOpen && !shouldResetSelection) return;
+    if (!scrollToTopOnOpen && !shouldResetSelection) {
+      // preserve + 不回顶：静默刷新保位置——只刷首屏 + total，不滚动；
+      // 深处未加载行由后续 loadRange 懒加载。
+      if (hadDeferred) {
+        deferredReloadRef.current = false;
+        reload();
+      }
+      return;
+    }
 
     closePreview("windowOpenReset");
 
@@ -446,11 +460,25 @@ const List: FC = () => {
       clipboardViewState.groupId = openGroupId;
     }
 
-    if (!scrollToTopOnOpen) return;
+    if (!scrollToTopOnOpen) {
+      // 有选择重置但不回顶：同值写入时 query-effect 不触发，用显式补刷兜底；
+      // 真改变 query 时与 resetAndReload 重复一次首屏 IPC（token 保后胜），可接受。
+      if (hadDeferred) {
+        deferredReloadRef.current = false;
+        reload();
+      }
+      return;
+    }
 
     setSelectedId(null);
     virtuosoRef.current?.scrollToIndex({ behavior: "auto", index: 0 });
-    consumeDeferredReloadAtTop();
+    // 开回顶：show 即将可见，deferred 已证明有新数据，直刷不再经 isAtTop 门控——
+    // 同步消费时 isAtTop 仍是隐藏前旧值（多半为 false），走门控必成 no-op。
+    // 后续 atTopStateChange(true) 发现 deferred 为 false 直接返回，不重复拉取。
+    if (hadDeferred) {
+      deferredReloadRef.current = false;
+      reload();
+    }
   };
 
   useTauriListen<WindowVisibilityPayload>(
