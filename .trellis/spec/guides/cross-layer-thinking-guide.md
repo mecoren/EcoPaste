@@ -69,6 +69,10 @@ show/hide command or native close
 Watch for: macOS delayed NSPanel show, Windows non-focusable keyboard hooks,
 destroyable preference/preview windows, pending-slot delivery, and keepalive or
 dirty owners before destroy.
+Deferred `window://visibility` work: snapshot pending flags before writing
+`clipboardViewState` (filter-change effects clear them), and consume them on
+every show branch — preserve + no-scroll-to-top included — with a direct reload
+instead of an `isAtTop`-gated one.
 
 ### Storage and Backup
 
