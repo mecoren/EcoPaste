@@ -5,7 +5,11 @@ import { popupClipboardItemMenu, startDragClipboardItem } from "@/commands";
 import AssetImage from "@/components/AssetImage";
 import KeyHint from "@/components/KeyHint";
 import type { ItemActionLabels } from "@/constants/itemActions";
-import type { ClipboardAction, ClipboardItem } from "@/types/clipboard";
+import type {
+  ClipboardAction,
+  ClipboardItem,
+  PasteTransform,
+} from "@/types/clipboard";
 import type { ItemAction } from "@/types/settings";
 import { cn } from "@/utils/cn";
 import { isMac } from "@/utils/is";
@@ -41,6 +45,10 @@ interface ClipboardCardProps {
   quickActions?: ItemAction[];
   quickActionLabels?: ItemActionLabels;
   onQuickAction?: (action: ItemAction) => Promise<void> | void;
+  /**
+   * 文本条目的「清理粘贴」变换入口；非文本条目由快捷动作层自行隐藏。
+   */
+  onCleanupPaste?: (transform: PasteTransform) => Promise<void> | void;
   showOriginalOnHover?: boolean;
   rootRef?: Ref<HTMLDivElement>;
 }
@@ -71,6 +79,7 @@ const ClipboardCard: FC<ClipboardCardProps> = (props) => {
     quickActions = [],
     quickActionLabels,
     onQuickAction,
+    onCleanupPaste,
     showOriginalOnHover = true,
     rootRef,
   } = props;
@@ -169,6 +178,7 @@ const ClipboardCard: FC<ClipboardCardProps> = (props) => {
         <ClipboardQuickActions
           item={item}
           labels={quickActionLabels}
+          onCleanupPaste={onCleanupPaste}
           onQuickAction={onQuickAction}
           quickActions={quickActions}
           visible={hovered}

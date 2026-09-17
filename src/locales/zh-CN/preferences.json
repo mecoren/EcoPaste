@@ -479,6 +479,16 @@
           "description": "粘贴文件记录时默认不粘贴文件本身，只粘贴文件路径。",
           "title": "默认文件路径粘贴"
         },
+        "mergeSeparator": {
+          "description": "多选文本条目合并粘贴时，用于拼接各条内容的分隔符。",
+          "options": {
+            "comma": "逗号",
+            "newline": "换行",
+            "none": "无",
+            "space": "空格"
+          },
+          "title": "合并粘贴分隔符"
+        },
         "middleClick": {
           "description": "选择鼠标中键点击历史记录时执行的动作。",
           "options": {

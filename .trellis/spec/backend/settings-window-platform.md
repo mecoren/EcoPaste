@@ -20,6 +20,8 @@ When adding a setting, update:
 - TypeScript `src/types/settings.ts`.
 - Preference schema in `src/pages/Preference/config/preferenceSchema.ts` if the
   setting is user-visible.
+- Icon mapping in `src/pages/Preference/components/settingControls/settingVisual.ts`
+  (`SETTING_ICON_MAP`; missing entries silently fall back to `i-lucide:circle`).
 - zh-CN and en-US locale entries.
 - Side effects in `commands/settings.rs` or
   `src/pages/Preference/services/preferenceSettings.ts` when OS state changes
@@ -368,6 +370,13 @@ Enter paste, Backspace/Delete delete.
 `ctrl_shortcut_key_whitelists_frontend_shortcuts_only` in
 `keyboard/windows.rs` locks this contract: extend that test whenever a new
 Ctrl shortcut is added to the frontend.
+
+> **Gotcha**: the hook must also forward the modifier state the frontend
+> discriminates on. `Ctrl+Shift+Enter` vs `Ctrl+Enter` share one whitelist
+> entry (`Enter`); without `shiftKey` in the `keyboard://nav` payload the
+> frontend (`eventModifierPressed && event.shiftKey`) can never fire the
+> Shift branch on Windows. When a shortcut distinguishes Shift/Alt, update
+> the emit site, not just the whitelist.
 
 ### Scenario: Windows Clipboard Editable Focus
 

@@ -11,21 +11,23 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::clipboard::{
-    add_app_from_path, build_item_with_settings, delete_unreferenced_apps, detect_frontmost,
-    materialize_source, persist_and_notify, refresh_running_apps, sanitize_css_color,
-    spawn_materialize_icon, AppIconStore, AppsRegistry, ClipboardReader, FileIconStore, ImageStore,
+    add_app_from_path, apply_paste_transform, build_item_with_settings, delete_unreferenced_apps,
+    detect_frontmost, join_merge_texts, materialize_source, order_merge_parts, persist_and_notify,
+    refresh_running_apps, sanitize_css_color, spawn_materialize_icon, write_merged_text,
+    AppIconStore, AppsRegistry, ClipboardReader, FileIconStore, ImageStore, PasteTransform,
     WritebackGuard,
 };
 use crate::core::{AppError, Result};
 use crate::db::items::{
     clear_items, delete_items, find_item_by_id, find_item_for_list_by_id, increment_item_use_count,
+    list_items_by_ids,
 };
 use crate::db::models::{
     ClipboardAction, ClipboardApp, ClipboardGroup, ClipboardItem, ClipboardItemPage,
     ClipboardItemQuery, ClipboardKind, ClipboardSubKind, FileEntry, FilesPreviewKind, Platform,
 };
 use crate::db::DatabaseState;
-use crate::settings::{RichTextMode, SettingsStore};
+use crate::settings::{MergePasteSeparator, RichTextMode, SettingsStore};
 use crate::window::{self, CLIPBOARD_WINDOW_LABEL};
 
 /// 与前端 `src/constants/events.ts` 的 `TAURI_EVENT.CLIPBOARD_UPDATED` 一一对应。
@@ -446,6 +448,9 @@ pub async fn write_text_to_clipboard(app: AppHandle, text: String) -> Result<()>
 
 /// 「点击列表项 → 自动粘贴」的组合命令：写回剪贴板 + 隐藏剪贴板窗口 + 触发系统级粘贴。
 ///
+/// `transform` 为 `Some` 时仅 Text 类可用：对纯文本表示做清理变换后走纯文本写回，
+/// 并抑制变换后哈希（不污染历史）；`None` 时走既有写回语义。
+///
 /// 窗口已是非激活面板（macOS NSPanel `nonactivating_panel` / Windows `focusable=false`），
 /// show 时不会把前台 App 推走，前台焦点始终在用户原窗口。
 /// macOS 上 panel 会成为 key window，CGEvent ⌘V 若不先 hide 会被 panel 自己吞掉，
@@ -459,11 +464,35 @@ pub async fn paste_clipboard_item(
     guard: State<'_, Arc<WritebackGuard>>,
     id: String,
     plain: bool,
+    transform: Option<PasteTransform>,
 ) -> Result<()> {
     let pool = db.pool().await;
     let item = find_item_by_id(&pool, &id)
         .await?
         .ok_or_else(|| AppError::Clipboard(format!("clipboard item not found: {id}")))?;
+
+    if let Some(transform) = transform {
+        if item.kind != ClipboardKind::Text {
+            return Err(AppError::Clipboard(
+                "only text items support cleanup paste".to_owned(),
+            ));
+        }
+
+        let source = item
+            .search_text
+            .clone()
+            .unwrap_or_else(|| item.content.clone());
+        let transformed = apply_paste_transform(&source, transform);
+        if transformed.trim().is_empty() {
+            return Err(AppError::Clipboard("clipboard text is empty".to_owned()));
+        }
+
+        write_merged_text(guard.inner().as_ref(), &transformed)?;
+        mark_item_reused_if_enabled(&app, &pool, &id, item.kind).await?;
+        run_paste_sequence(&app).await?;
+
+        return Ok(());
+    }
 
     let settings = app.state::<SettingsStore>().snapshot();
     let write_plain = should_write_plain_for_paste(
@@ -475,11 +504,62 @@ pub async fn paste_clipboard_item(
 
     crate::clipboard::write_to_clipboard(&store, guard.inner().as_ref(), &item, write_plain)?;
     mark_item_reused_if_enabled(&app, &pool, &id, item.kind).await?;
+    run_paste_sequence(&app).await?;
 
+    Ok(())
+}
+
+/// 多选合并粘贴：按 `ids` 传入序（前端已按列表显示序顶→底排好）拼接纯文本后一次写回 + 模拟粘贴。
+///
+/// - 仅文本类参与；含非文本或缺失 id 直接报错，不做部分粘贴（前端合并按钮已禁用 + toast）。
+/// - 富文本取纯文本表示（`search_text` 回退 `content`）。
+/// - 合成串走纯文本写回并抑制合成哈希 → 合并不进历史（对齐 Ditto）；逐条累加 `use_count`
+///  （复用 `update_on_reuse` 开关语义）。
+/// - `separator` 为合并分隔符设置值（`newline` / `space` / `none` / `comma`），
+///   非法字面量在反序列化直接报错。
+/// - `plain` 保留调用形状对称，合并串恒为纯文本，取值被忽略。
+#[tauri::command]
+pub async fn paste_clipboard_items(
+    app: AppHandle,
+    db: State<'_, DatabaseState>,
+    guard: State<'_, Arc<WritebackGuard>>,
+    ids: Vec<String>,
+    separator: MergePasteSeparator,
+    plain: bool,
+) -> Result<()> {
+    let _ = plain;
+
+    if ids.len() < 2 {
+        return Err(AppError::Clipboard(
+            "select at least two items to merge".to_owned(),
+        ));
+    }
+
+    let pool = db.pool().await;
+    let rows = list_items_by_ids(&pool, &ids).await?;
+    let parts = order_merge_parts(&ids, &rows)?;
+    let merged = join_merge_texts(&parts, separator.as_str());
+    if merged.trim().is_empty() {
+        return Err(AppError::Clipboard("clipboard text is empty".to_owned()));
+    }
+
+    write_merged_text(guard.inner().as_ref(), &merged)?;
+    for id in &ids {
+        mark_item_reused_if_enabled(&app, &pool, id, ClipboardKind::Text).await?;
+    }
+    run_paste_sequence(&app).await?;
+
+    Ok(())
+}
+
+/// 粘贴键击序列（`paste_clipboard_item` / `paste_clipboard_items` 共用）：
+/// Windows 先退出搜索框 editing 态交还前台 → 非固定隐藏窗口 / 固定 resign key →
+/// 等 50ms 让异步 hide 落定 → 注入 ⌘V / Ctrl+V → 固定窗口再等一拍拿回 key。
+async fn run_paste_sequence(app: &AppHandle) -> Result<()> {
     // Windows：搜索框可能处于 editing 态（窗口是前台），先把前台交还原应用再注入按键，
     // 否则 Ctrl+V 会命中剪贴板窗口自己。未 editing 时此调用无副作用。
     #[cfg(target_os = "windows")]
-    if let Err(err) = window::set_clipboard_window_editing(&app, false) {
+    if let Err(err) = window::set_clipboard_window_editing(app, false) {
         log::warn!("exit clipboard window editing before paste failed: {err:?}");
     }
 
@@ -487,10 +567,10 @@ pub async fn paste_clipboard_item(
         // 固定时窗口保持可见：macOS 上 panel 仍是 key window 会吞掉 ⌘V，需先 resign key
         // 让键焦点回到前台 App 的窗口；Windows 剪贴板窗口 focusable=false，无需处理。
         #[cfg(target_os = "macos")]
-        if let Err(err) = window::macos::resign_clipboard_panel_key(&app) {
+        if let Err(err) = window::macos::resign_clipboard_panel_key(app) {
             log::warn!("resign clipboard panel key before paste failed: {err:?}");
         }
-    } else if let Err(err) = window::hide_window(&app, CLIPBOARD_WINDOW_LABEL) {
+    } else if let Err(err) = window::hide_window(app, CLIPBOARD_WINDOW_LABEL) {
         log::warn!("hide clipboard window before paste failed: {err:?}");
     }
 
@@ -506,7 +586,7 @@ pub async fn paste_clipboard_item(
         #[cfg(target_os = "macos")]
         {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            if let Err(err) = window::macos::make_clipboard_panel_key(&app) {
+            if let Err(err) = window::macos::make_clipboard_panel_key(app) {
                 log::warn!("restore clipboard panel key after paste failed: {err:?}");
             }
         }

@@ -28,6 +28,12 @@ const CLIPBOARD_SORT_OPTIONS = [
   { value: "updatedAtDesc" },
   { value: "useCountDesc" },
 ];
+const MERGE_PASTE_SEPARATOR_OPTIONS = [
+  { value: "newline" },
+  { value: "space" },
+  { value: "none" },
+  { value: "comma" },
+];
 export const preferenceTabs: PreferenceTab[] = [
   {
     icon: "i-lucide:clipboard-plus",
@@ -302,6 +308,15 @@ export const preferenceTabs: PreferenceTab[] = [
             path: ["clipboard", "content", "pasteFilesAsPath"],
             value: (settings) => {
               return settings.clipboard.content.pasteFilesAsPath;
+            },
+          },
+          {
+            control: { options: MERGE_PASTE_SEPARATOR_OPTIONS, type: "select" },
+            id: "paste.mergeSeparator",
+            keywords: ["merge", "separator", "paste"],
+            path: ["clipboard", "content", "mergePasteSeparator"],
+            value: (settings) => {
+              return settings.clipboard.content.mergePasteSeparator;
             },
           },
         ],

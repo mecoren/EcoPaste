@@ -6,11 +6,21 @@
     "export": "导出所选",
     "favorite": "批量收藏",
     "loadingGroups": "加载分组…",
+    "merge": "合并粘贴",
+    "mergeNonText": "仅文本条目支持合并粘贴",
     "moveGroup": "移动到分组",
     "noGroups": "暂无分组",
     "pinned": "批量置顶",
     "removeFromGroup": "移出分组",
     "selected": "已选 {{count}} 项"
+  },
+  "cleanupPaste": {
+    "lowerCase": "转小写后粘贴",
+    "stripNewlines": "去换行后粘贴",
+    "title": "清理粘贴",
+    "trimLines": "每行去空白并去空行后粘贴",
+    "trimWhitespace": "去首尾空白后粘贴",
+    "upperCase": "转大写后粘贴"
   },
   "edit": {
     "emptyHint": "内容不能为空",
@@ -106,6 +116,7 @@
     "starActive": "取消收藏"
   },
   "shortcuts": {
+    "cleanupPaste": "去换行粘贴选中项",
     "closePreviewFilterWindow": "关闭预览 / 筛选 / 窗口",
     "copySelected": "复制选中项",
     "createGroup": "新增分组",
@@ -114,6 +125,7 @@
     "extendSelection": "扩展多选范围",
     "favoriteSelected": "收藏 / 取消收藏",
     "focusSearch": "聚焦搜索框",
+    "mergeSelected": "合并粘贴多选文本条目",
     "multiSelect": "加选 / 减选条目",
     "navigate": "上下导航",
     "noteSelected": "添加 / 编辑备注",

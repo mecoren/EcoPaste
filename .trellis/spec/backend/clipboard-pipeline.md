@@ -104,6 +104,59 @@ Reference files:
 - `src-tauri/src/clipboard/write.rs`
 - `src-tauri/src/clipboard/guard.rs`
 
+## Scenario: Merge Paste and Paste Transform
+
+### 1. Scope / Trigger
+
+Multi-select merge paste and single-item cleanup paste. Both reuse the single
+paste timing sequence but change what text is written and whether history
+records it.
+
+### 2. Signatures
+
+- `paste_clipboard_items(ids: Vec<i64>, separator: MergePasteSeparator, plain: bool)`
+- `paste_clipboard_item(..., transform: Option<PasteTransform>)`
+- `PasteTransform`: `StripNewlines | TrimLines | TrimWhitespace | UpperCase | LowerCase`
+- `MergePasteSeparator`: `Newline | Space | None | Comma` (setting
+  `clipboard.content.merge_paste_separator`, default `Newline`)
+
+### 3. Contracts
+
+- Merge joins `search_text.unwrap_or(content)` per item in frontend display
+  order; text kinds only, `image`/`files` never participate.
+- Merge and transform write via the plain-text path and suppress the
+  **result** hash (`content_hash("text", result)`), so neither enters history.
+- Per-source `use_count` still increments through `mark_item_reused_if_enabled`.
+- `transform` implies plain writeback even when `plain=false`.
+
+### 4. Validation & Error Matrix
+
+- Empty id list -> error, no write.
+- Non-text item in merge set -> skipped server-side (frontend disables first).
+- `transform` on non-text item -> error.
+- Unknown separator literal -> serde deserialization error, setting falls back
+  to `Newline` for missing fields.
+
+### 5. Good/Base/Bad Cases
+
+- Good: 3 text items + newline separator -> one paste, 3 use_counts, no new row.
+- Base: single item paste unchanged (`transform=None`).
+- Bad: suppressing a source-item hash instead of the result hash -> merged text
+  re-enters history on next watcher poll.
+
+### 6. Tests Required
+
+- Each `PasteTransform` on representative input (newlines, blank lines,
+  casing).
+- Merge join with `search_text` fallback and separator variants.
+- Suppression: merged/transformed hash marked skipped, source hashes untouched.
+
+### 7. Wrong vs Correct
+
+Wrong: `guard.suppress(source_hash)` then write merged text (history polluted).
+
+Correct: compute `merged = join(...)`, `guard.suppress(hash(merged))`, then write.
+
 ## Sensitive Content
 
 Secret detection lives in `clipboard/secrets.rs` and is applied during ingest.

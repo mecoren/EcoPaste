@@ -6,6 +6,7 @@ mod file_icon_store;
 mod guard;
 mod icon;
 mod ingest;
+mod paste;
 mod payload;
 mod read;
 mod rich_text;
@@ -28,6 +29,7 @@ pub use icon::{get_icon_cache_key, icon_png, DIR_CACHE_KEY};
 pub use ingest::build_item;
 pub use ingest::build_item_with_settings;
 pub use ingest::{exceeds_limit, make_summary};
+pub use paste::{apply_paste_transform, join_merge_texts, order_merge_parts, PasteTransform};
 pub use payload::{ClipboardPayload, ImagePayload, TextPayload};
 pub use read::ClipboardReader;
 pub use rich_text::rtf_to_html;
@@ -37,7 +39,7 @@ pub use storage::ImageStore;
 pub use watcher::{
     init, materialize_source, persist_and_notify, spawn_materialize_icon, WatcherPause,
 };
-pub use write::{write_plain_text, write_to_clipboard};
+pub use write::{write_merged_text, write_plain_text, write_to_clipboard};
 
 #[cfg(test)]
 pub(crate) mod test_lock {

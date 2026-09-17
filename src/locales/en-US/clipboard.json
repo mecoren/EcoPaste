@@ -6,11 +6,21 @@
     "export": "Export selected",
     "favorite": "Batch favorite",
     "loadingGroups": "Loading groups…",
+    "merge": "Merge paste",
+    "mergeNonText": "Only text items can be merged",
     "moveGroup": "Move to group",
     "noGroups": "No groups yet",
     "pinned": "Batch pin",
     "removeFromGroup": "Remove from group",
     "selected": "{{count}} selected"
+  },
+  "cleanupPaste": {
+    "lowerCase": "Paste as lowercase",
+    "stripNewlines": "Paste without line breaks",
+    "title": "Clean up & paste",
+    "trimLines": "Paste with trimmed lines and no empty lines",
+    "trimWhitespace": "Paste with trimmed whitespace",
+    "upperCase": "Paste as UPPERCASE"
   },
   "edit": {
     "emptyHint": "Content cannot be empty",
@@ -106,6 +116,7 @@
     "starActive": "Unfavorite"
   },
   "shortcuts": {
+    "cleanupPaste": "Paste selected item without line breaks",
     "closePreviewFilterWindow": "Close preview / filters / window",
     "copySelected": "Copy selected item",
     "createGroup": "Create group",
@@ -114,6 +125,7 @@
     "extendSelection": "Extend multi-selection",
     "favoriteSelected": "Favorite / unfavorite",
     "focusSearch": "Focus search",
+    "mergeSelected": "Merge selected text items",
     "multiSelect": "Add / remove from selection",
     "navigate": "Navigate up/down",
     "noteSelected": "Add / edit note",

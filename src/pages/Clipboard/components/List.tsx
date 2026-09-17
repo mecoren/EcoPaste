@@ -23,6 +23,7 @@ import {
   moveClipboardItemsToGroup,
   openClipboardItemLink,
   pasteClipboardItem,
+  pasteClipboardItems,
   revealClipboardItem,
   saveClipboardImageToFile,
   setClipboardItemsFavorite,
@@ -61,9 +62,11 @@ import type {
   ClipboardItem,
   ClipboardKind,
   ClipboardRange,
+  PasteTransform,
 } from "@/types/clipboard";
 import type { ItemAction } from "@/types/settings";
 import { cn } from "@/utils/cn";
+import { getMessageApi } from "@/utils/feedback";
 import { isMac } from "@/utils/is";
 import { log } from "@/utils/log";
 import type { WindowVisibilityPayload } from "../hooks/previewController";
@@ -703,6 +706,39 @@ const List: FC = () => {
   };
 
   /**
+   * 合并粘贴多选集：要求 ≥2 条且全为文本，按当前列表显示序（顶→底）排序后传参；
+   * 含非文本（或选中项尚未加载）时 toast 提示且不粘贴。合成串不进历史，
+   * 逐条 use_count 由 Rust 按 `updateOnReuse` 开关累加。
+   */
+  const handleMergePaste = () => {
+    if (multiSelectedIds.length < 2) return;
+
+    const targets = multiSelectedIds
+      .map((id) => findItemById(id))
+      .filter((item): item is ClipboardItem => item !== null);
+
+    if (
+      targets.length !== multiSelectedIds.length ||
+      targets.some((item) => item.kind !== "text")
+    ) {
+      getMessageApi().warning(t("batchToolbar.mergeNonText"));
+      return;
+    }
+
+    const orderedIds = orderIdsByDisplayIndex(
+      multiSelectedIds,
+      getItemIndexById,
+    );
+
+    closePreview("mergePaste");
+    void pasteClipboardItems(
+      orderedIds,
+      settings.clipboard.content.mergePasteSeparator,
+      true,
+    );
+  };
+
+  /**
    * 批量设置收藏态：全未收藏 → 收藏；任一已收藏 → 取消收藏（与单条快捷键
    * 「读当前态取反」同语义，但批量下按选中集整体决策）。
    */
@@ -930,6 +966,25 @@ const List: FC = () => {
 
     if (event.key === "Enter") {
       event.preventDefault();
+
+      // Ctrl/Cmd+Shift+Enter：对当前项做去换行清理粘贴（最高频的文本清理痛点）。
+      if (eventModifierPressed && event.shiftKey) {
+        const activeItem = getActiveItem();
+
+        if (activeItem?.kind !== "text") return;
+
+        closePreview("cleanupPaste");
+        void pasteClipboardItem(activeItem.id, false, "stripNewlines");
+
+        return;
+      }
+
+      // 多选（≥2）全文本合并粘贴；含非文本时 toast 提示且不粘贴。
+      if (multiSelectedIds.length >= 2) {
+        handleMergePaste();
+
+        return;
+      }
 
       const activeItem = getActiveItem();
 
@@ -1210,6 +1265,15 @@ const List: FC = () => {
     );
   }
 
+  const mergeTargets = multiSelectedIds.map((id) => findItemById(id));
+  const mergeBlockedByNonText =
+    multiSelectedIds.length >= 2 &&
+    (mergeTargets.includes(null) ||
+      mergeTargets.some((item) => item?.kind !== "text"));
+  const mergeDisabledReason = mergeBlockedByNonText
+    ? t("batchToolbar.mergeNonText")
+    : null;
+
   return (
     <div
       className="relative flex-1 overflow-hidden"
@@ -1232,11 +1296,13 @@ const List: FC = () => {
       ) : null}
 
       <BatchActionToolbar
+        mergeDisabledReason={mergeDisabledReason}
         onBatchDelete={handleBatchDelete}
         onBatchExport={() => {
           setBatchExportOpen(true);
         }}
         onBatchFavorite={handleBatchFavorite}
+        onBatchMerge={handleMergePaste}
         onBatchMoveGroup={() => {
           setGroupPickerOpen(true);
         }}
@@ -1340,6 +1406,14 @@ const List: FC = () => {
 
     const handleEditNote = () => {
       handleOpenNote(item, "editNote");
+    };
+
+    /**
+     * 「清理粘贴」变换入口：变换后恒走纯文本写回且不进历史，由 Rust 侧保证语义。
+     */
+    const handleCleanupPaste = async (transform: PasteTransform) => {
+      closePreview("cleanupPaste");
+      await pasteClipboardItem(item.id, false, transform);
     };
 
     const handleQuickAction = async (action: ItemAction) => {
@@ -1499,6 +1573,7 @@ const List: FC = () => {
           }
           item={item}
           onAuxClick={handleAuxClick}
+          onCleanupPaste={handleCleanupPaste}
           onDoubleClick={handleDoubleClick}
           onMouseDown={handleMouseDown}
           onOpenLink={handleOpenLink}
@@ -1729,6 +1804,26 @@ function getCurrentGroupName(
   });
 
   return current?.name ?? null;
+}
+
+/**
+ * 把多选 id 按当前列表显示序（顶→底）排序后返回；尚未加载的 id 沉底，
+ * 保持合并粘贴的拼接顺序与用户看到的列表一致。
+ */
+function orderIdsByDisplayIndex(
+  ids: string[],
+  getItemIndexById: (id: string) => number | null,
+) {
+  return [...ids].sort((first, second) => {
+    const firstIndex = getItemIndexById(first);
+    const secondIndex = getItemIndexById(second);
+
+    if (firstIndex === null && secondIndex === null) return 0;
+    if (firstIndex === null) return 1;
+    if (secondIndex === null) return -1;
+
+    return firstIndex - secondIndex;
+  });
 }
 
 /**

@@ -57,6 +57,7 @@ export const TAURI_COMMAND = {
   OPEN_PREFERENCE_WITH_HIGHLIGHT: "open_preference_with_highlight",
   OPEN_UPDATE_WINDOW: "open_update_window",
   PASTE_CLIPBOARD_ITEM: "paste_clipboard_item",
+  PASTE_CLIPBOARD_ITEMS: "paste_clipboard_items",
   PLAY_COPY_SOUND: "play_copy_sound",
   POPUP_CLIPBOARD_ITEM_MENU: "popup_clipboard_item_menu",
   RELEASE_WINDOW_KEEPALIVE: "release_window_keepalive",

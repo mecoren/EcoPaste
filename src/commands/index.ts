@@ -22,9 +22,14 @@ import type {
   ClipboardItemQuery,
   ClipboardKind,
   ClipboardSubKind,
+  PasteTransform,
   UpdateNoteResult,
 } from "@/types/clipboard";
-import type { Settings, SettingsPatch } from "@/types/settings";
+import type {
+  MergePasteSeparator,
+  Settings,
+  SettingsPatch,
+} from "@/types/settings";
 import { getMessageApi, getModalApi } from "@/utils/feedback";
 import { log } from "@/utils/log";
 import { confirmClearClipboardItems } from "./confirmClearClipboardItems";
@@ -1116,13 +1121,36 @@ export const writeTextToClipboard = async (
 /**
  * 「写回剪贴板 + 隐藏剪贴板窗口 + 模拟系统粘贴」的组合命令。
  * `plain` 为显式纯文本 / 路径粘贴动作；默认粘贴格式由 Rust 按设置与记录类型决定。
- * 回车 / 数字快捷键 / 右键菜单全部走这里。
+ * `transform` 为文本清理变换（仅文本条目）：变换后恒走纯文本写回且不进历史；
+ * 不传时走既有写回语义。回车 / 数字快捷键 / 右键菜单全部走这里。
  */
-export const pasteClipboardItem = (id: string, plain: boolean) => {
+export const pasteClipboardItem = (
+  id: string,
+  plain: boolean,
+  transform?: PasteTransform | null,
+) => {
   return call<void>(
     TAURI_COMMAND.PASTE_CLIPBOARD_ITEM,
     "commands:labels.paste",
-    { id, plain },
+    { id, plain, transform: transform ?? null },
+  );
+};
+
+/**
+ * 多选合并粘贴：按 `ids` 传入序拼接纯文本后一次写回 + 模拟粘贴。
+ * 调用方需先按列表显示序（顶→底）排好 `ids`；`separator` 取自
+ * `clipboard.content.mergePasteSeparator` 设置镜像。合成串不进历史，
+ * 逐条 `use_count` 由 Rust 按 `updateOnReuse` 开关累加。
+ */
+export const pasteClipboardItems = (
+  ids: string[],
+  separator: MergePasteSeparator,
+  plain: boolean,
+) => {
+  return call<void>(
+    TAURI_COMMAND.PASTE_CLIPBOARD_ITEMS,
+    "commands:labels.paste",
+    { ids, plain, separator },
   );
 };
 

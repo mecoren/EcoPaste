@@ -25,6 +25,11 @@ const Kbd: FC<{ children: ReactNode }> = (props) => {
 const SHORTCUTS: Shortcut[] = [
   { keys: "Enter", labelKey: "shortcuts.pasteSelected" },
   { keys: "CmdOrCtrl+Enter", labelKey: "shortcuts.pasteSelectedPlain" },
+  { keys: "Enter", labelKey: "shortcuts.mergeSelected" },
+  {
+    keys: ["CmdOrCtrl", "Shift", "Enter"],
+    labelKey: "shortcuts.cleanupPaste",
+  },
   { keys: ["CmdOrCtrl", "1-0"], labelKey: "shortcuts.pasteNth" },
   {
     keys: ["CmdOrCtrl", "Shift", "1-0"],

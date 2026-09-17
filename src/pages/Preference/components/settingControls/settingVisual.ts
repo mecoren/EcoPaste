@@ -52,6 +52,7 @@ const SETTING_ICON_MAP: Record<string, string> = {
   "organizing.customGroups": "i-lucide:folder-tree",
   "paste.autoPaste": "i-ph:mouse-left-click-bold",
   "paste.fileMode": "i-lucide:file-symlink",
+  "paste.mergeSeparator": "i-lucide:combine",
   "paste.middleClick": "i-ph:mouse-middle-click-bold",
   "paste.plainDefault": "i-lucide:clipboard-type",
   "permissions.accessibility": "i-lucide:accessibility",

@@ -319,9 +319,12 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
         if let Some(shortcut_key) = shortcut_key {
             if let Some(app) = APP_HANDLE.get() {
+                // Ctrl+Shift+Enter（清理粘贴）需要 Shift 态：与 Tab 分支同口径上报，
+                // 前端合成 KeyboardEvent 时才能还原 `shiftKey`。
+                let shift_down = (GetAsyncKeyState(VK_SHIFT) as u16) & 0x8000 != 0;
                 if let Err(err) = app.emit(
                     NAV_EVENT,
-                    json!({ "type": "keydown", "key": shortcut_key, "ctrlKey": true }),
+                    json!({ "type": "keydown", "key": shortcut_key, "ctrlKey": true, "shiftKey": shift_down }),
                 ) {
                     log::warn!("emit nav event failed: {err:?}");
                 }

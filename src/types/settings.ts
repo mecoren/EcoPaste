@@ -50,6 +50,9 @@ export type ItemAction =
 
 export type CaptureKind = "files" | "image" | "html" | "rtf" | "text";
 
+/** 与 Rust `MergePasteSeparator`（`rename_all = "camelCase"`）对应。 */
+export type MergePasteSeparator = "newline" | "space" | "none" | "comma";
+
 export type RetentionUnit = "hours" | "days" | "weeks" | "months" | "forever";
 
 export type WindowPosition = "remember" | "followCursor" | "center";
@@ -104,6 +107,7 @@ export interface Content {
   autoFavorite: boolean;
   updateOnReuse: boolean;
   sort: ClipboardItemSort;
+  mergePasteSeparator: MergePasteSeparator;
   itemActions: ItemAction[];
   itemActionOrder: ItemAction[];
 }

@@ -479,6 +479,16 @@
           "description": "When pasting file records, paste file paths by default instead of the files themselves.",
           "title": "Paste File Paths by Default"
         },
+        "mergeSeparator": {
+          "description": "Separator used to join multiple text items when merge-pasting them.",
+          "options": {
+            "comma": "Comma",
+            "newline": "Newline",
+            "none": "None",
+            "space": "Space"
+          },
+          "title": "Merge Paste Separator"
+        },
         "middleClick": {
           "description": "Choose what happens when clicking a history record with the middle mouse button.",
           "options": {

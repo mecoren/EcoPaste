@@ -154,6 +154,17 @@ fn write_files_as_text(
     Ok(())
 }
 
+/// 把合成纯文本写入系统剪贴板并登记回环抑制（合并粘贴 / 清理粘贴路径）。
+///
+/// 与 [`write_to_clipboard`] 的纯文本分支同哈希口径（`content_hash(Text, text)`），
+/// 监听端读到同串即跳过入库——合成串不进历史；逐条 `use_count` 由命令层另行累加。
+pub fn write_merged_text(guard: &WritebackGuard, text: &str) -> Result<()> {
+    let ctx = ClipboardContext::new().map_err(clip_err)?;
+    guard.suppress(content_hash(ClipboardKind::Text, text));
+    ctx.set_text(text.to_owned()).map_err(clip_err)?;
+    Ok(())
+}
+
 fn clip_err<E: std::fmt::Display>(err: E) -> AppError {
     AppError::Clipboard(err.to_string())
 }

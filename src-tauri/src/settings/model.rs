@@ -356,6 +356,8 @@ pub struct Content {
     pub update_on_reuse: bool,
     /// 历史列表默认排序，和 `ClipboardItemQuery.sort` 使用同一套契约字面量。
     pub sort: ClipboardItemSort,
+    /// 多选合并粘贴时的文本分隔符。
+    pub merge_paste_separator: MergePasteSeparator,
     /// 列表项悬停操作按钮（仅保存已启用项，顺序按 `item_action_order` 过滤）。
     pub item_actions: Vec<ItemAction>,
     /// 列表项悬停操作按钮的完整排序，包含未启用项，供偏好弹框下次打开时恢复位置。
@@ -381,6 +383,7 @@ impl Default for Content {
             auto_favorite: false,
             update_on_reuse: false,
             sort: ClipboardItemSort::UpdatedAt,
+            merge_paste_separator: MergePasteSeparator::Newline,
             item_actions: vec![
                 ItemAction::Copy,
                 ItemAction::Star,
@@ -431,6 +434,29 @@ impl Display {
     /// 返回主列表文件条目上限，并夹在 UI 支持的范围内控制 IPC 与 icon 抽取成本。
     pub fn file_entry_limit(self) -> usize {
         usize::from(self.file_max_count.clamp(1, 5))
+    }
+}
+
+/// 多选合并粘贴时的文本分隔符。缺字段的旧配置文件回落到换行。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum MergePasteSeparator {
+    #[default]
+    Newline,
+    Space,
+    None,
+    Comma,
+}
+
+impl MergePasteSeparator {
+    /// 合并粘贴时的实际连接串。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Newline => "\n",
+            Self::Space => " ",
+            Self::None => "",
+            Self::Comma => ",",
+        }
     }
 }
 

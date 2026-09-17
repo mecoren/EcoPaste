@@ -3,6 +3,7 @@ import { Dropdown } from "antd";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import type { FC, MouseEvent, SyntheticEvent } from "react";
 import { useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import Tooltip from "@/components/Tooltip";
 import {
   filterAvailableItemActions,
@@ -10,7 +11,7 @@ import {
   isCopyItemAction,
   resolveItemActionPresentation,
 } from "@/constants/itemActions";
-import type { ClipboardItem } from "@/types/clipboard";
+import type { ClipboardItem, PasteTransform } from "@/types/clipboard";
 import type { ItemAction } from "@/types/settings";
 import { cn } from "@/utils/cn";
 
@@ -20,6 +21,7 @@ const INLINE_ACTIONS_LIMIT = 3;
 interface ClipboardQuickActionsProps {
   item: ClipboardItem;
   labels?: ItemActionLabels;
+  onCleanupPaste?: (transform: PasteTransform) => Promise<void> | void;
   onQuickAction?: (action: ItemAction) => Promise<void> | void;
   quickActions: ItemAction[];
   visible: boolean;
@@ -41,12 +43,15 @@ interface QuickActionButtonProps {
  * 动作超过 [`INLINE_ACTIONS_LIMIT`] 个时前 3 个平铺、其余折叠进「…」菜单。
  */
 const ClipboardQuickActions: FC<ClipboardQuickActionsProps> = (props) => {
-  const { item, labels, onQuickAction, quickActions, visible } = props;
+  const { item, labels, onCleanupPaste, onQuickAction, quickActions, visible } =
+    props;
   const shouldReduceMotion = useReducedMotion();
   const availableActions = filterAvailableItemActions(quickActions, item);
   const enabled =
     availableActions.length > 0 && Boolean(labels && onQuickAction);
-  const actionsVisible = visible && enabled;
+  const cleanupAvailable =
+    item.kind === "text" && Boolean(labels && onQuickAction && onCleanupPaste);
+  const actionsVisible = visible && (enabled || cleanupAvailable);
   const tabIndex = actionsVisible ? 0 : -1;
   const actionTransition = {
     duration: shouldReduceMotion ? 0 : 0.16,
@@ -68,7 +73,7 @@ const ClipboardQuickActions: FC<ClipboardQuickActionsProps> = (props) => {
         {item.displayCreatedAt ?? item.createdAt}
       </span>
 
-      {enabled && onQuickAction && labels ? (
+      {labels && onQuickAction && (enabled || cleanupAvailable) ? (
         <div
           aria-hidden={!actionsVisible}
           className={cn(
@@ -121,6 +126,13 @@ const ClipboardQuickActions: FC<ClipboardQuickActionsProps> = (props) => {
               isPinned={item.isPinned}
               labels={labels}
               onQuickAction={onQuickAction}
+            />
+          ) : null}
+
+          {cleanupAvailable && onCleanupPaste ? (
+            <CleanupPasteMenu
+              onCleanupPaste={onCleanupPaste}
+              tabIndex={tabIndex}
             />
           ) : null}
         </div>
@@ -187,6 +199,68 @@ const OverflowActionsMenu: FC<OverflowActionsMenuProps> = (props) => {
 };
 
 export default ClipboardQuickActions;
+
+/** 「清理粘贴」支持的 5 种变换，与 Rust `PasteTransform` 同序。 */
+const CLEANUP_PASTE_TRANSFORMS: PasteTransform[] = [
+  "stripNewlines",
+  "trimLines",
+  "trimWhitespace",
+  "upperCase",
+  "lowerCase",
+];
+
+interface CleanupPasteMenuProps {
+  onCleanupPaste: (transform: PasteTransform) => Promise<void> | void;
+  tabIndex: 0 | -1;
+}
+
+/**
+ * 文本条目的「清理粘贴」下拉菜单：变换后走纯文本写回且不进历史。
+ * 独立于用户可配置的悬停快捷动作，只按条目类型（文本）显隐。
+ */
+const CleanupPasteMenu: FC<CleanupPasteMenuProps> = (props) => {
+  const { onCleanupPaste, tabIndex } = props;
+  const { t } = useTranslation("clipboard");
+
+  const menuItems = CLEANUP_PASTE_TRANSFORMS.map((transform) => {
+    return {
+      key: transform,
+      label: t(`cleanupPaste.${transform}`),
+    };
+  });
+
+  // 与 OverflowActionsMenu 同构：Dropdown 直包 button，外层不再套 Tooltip。
+  // Tooltip 套 Dropdown 会让双层浮层同时 clone 同一个 trigger，在虚拟列表里
+  // 诱发 Maximum update depth（hover 测量循环经 Virtuoso 回调放大）；hover
+  // 提示改用原生 title，零 JS 浮层。
+  return (
+    <Dropdown
+      menu={{
+        items: menuItems,
+        onClick: ({ key }) => {
+          onCleanupPaste(key as PasteTransform);
+        },
+      }}
+      trigger={["click"]}
+    >
+      <button
+        aria-label={t("cleanupPaste.title")}
+        className="flex size-5 items-center justify-center rounded-1.5 border-0 bg-transparent text-ant-secondary transition-colors hover:bg-ant-fill-tertiary hover:text-ant-text motion-reduce:transition-none"
+        onClick={(event) => {
+          event.stopPropagation();
+        }}
+        onPointerDown={(event) => {
+          event.stopPropagation();
+        }}
+        tabIndex={tabIndex}
+        title={t("cleanupPaste.title")}
+        type="button"
+      >
+        <i aria-hidden="true" className="i-lucide:eraser text-sm" />
+      </button>
+    </Dropdown>
+  );
+};
 
 /**
  * 单个 hover 快捷动作按钮；按下时阻止事件冒泡，避免触发卡片点击或自动粘贴。

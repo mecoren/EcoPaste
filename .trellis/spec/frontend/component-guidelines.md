@@ -91,6 +91,15 @@ plain scroll-area component only when a real non-virtual call site is being
 converted, instead of stretching `VirtuosoScroller` across incompatible scroll
 contracts.
 
+## Overlay Triggers in Virtualized Lists
+
+Do not nest antd `Tooltip` outside antd `Dropdown` on the same trigger inside
+`react-virtuoso` rows. Both clone the trigger for measurement, and the nested
+cycle amplifies through Virtuoso's ref effect into `Maximum update depth
+exceeded` while browsing. Proven shapes: `Tooltip > button`
+(`QuickActionButton`) and `Dropdown > button` (`OverflowActionsMenu`,
+`CleanupPasteMenu` — the latter uses native `title` for its hover hint).
+
 ## HTML / SVG Safety
 
 Clipboard HTML preview is rendered as plain text. Do not add a generic shared
@@ -141,3 +150,5 @@ For Ant Design controls, prefer built-in components and their `disabled`,
 - Unmounting measured clipboard-card content during hover animations inside the
   virtualized list. Keep alternate note/original layers mounted and measure the
   active layer so Virtuoso never records a transient zero-height item.
+- Nesting `Tooltip` outside `Dropdown` on one trigger in virtualized rows; use
+  `Dropdown > button` with native `title` instead.

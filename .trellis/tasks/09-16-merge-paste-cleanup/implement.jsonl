@@ -1,0 +1,8 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": "AGENTS.md", "reason": "Rust-First边界与跨端字面量集中维护"}
+{"file": ".trellis/spec/backend/commands-and-events.md", "reason": "新命令paste_clipboard_items与transform参数契约"}
+{"file": ".trellis/spec/backend/clipboard-pipeline.md", "reason": "拼接取search_text回退content与回环抑制口径"}
+{"file": ".trellis/spec/backend/settings-window-platform.md", "reason": "新增merge_paste_separator设置与粘贴时序"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Valtio只存UI态与设置镜像"}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "命令包装与常量同步"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Rust命令与前端调用双向同步检查"}

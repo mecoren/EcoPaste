@@ -116,6 +116,17 @@ export type ClipboardRange = "all" | "favorite";
 
 export type ClipboardCategory = ClipboardKind;
 
+/**
+ * 单条粘贴的文本清理变换。与 Rust `clipboard::PasteTransform`
+ * （`serde(rename_all = "camelCase")`）一一对应。
+ */
+export type PasteTransform =
+  | "stripNewlines"
+  | "trimLines"
+  | "trimWhitespace"
+  | "upperCase"
+  | "lowerCase";
+
 export type ClipboardGroupIcon = string;
 
 export interface ClipboardGroupRecord {

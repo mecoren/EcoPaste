@@ -128,6 +128,7 @@ pub fn run() {
             commands::get_file_icon_path,
             commands::write_to_clipboard,
             commands::paste_clipboard_item,
+            commands::paste_clipboard_items,
             commands::start_drag_clipboard_item,
             commands::toggle_clipboard_item_favorite,
             commands::toggle_clipboard_item_pinned,
