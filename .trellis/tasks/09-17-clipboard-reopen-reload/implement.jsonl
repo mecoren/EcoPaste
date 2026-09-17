@@ -1,0 +1,4 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "clipboardViewState/query-effect 与 reload 语义，reopen 补刷不能破坏"}
+{"file": ".trellis/spec/backend/commands-and-events.md", "reason": "clipboard://updated 与 window://visibility 跨端事件契约"}
+{"file": ".trellis/tasks/09-17-clipboard-reopen-reload/research/reopen-reload-investigation.md", "reason": "reopen 不刷新的完整证据链与 file:line 锚点"}

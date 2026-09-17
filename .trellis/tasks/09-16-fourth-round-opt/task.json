@@ -1,0 +1,31 @@
+{
+  "assignee": "wait",
+  "base_branch": "wait",
+  "branch": null,
+  "children": [
+    "09-16-merge-paste-cleanup",
+    "09-16-search-filter-syntax",
+    "09-16-frontend-mem-render",
+    "09-16-db-stats-macos"
+  ],
+  "commit": null,
+  "completedAt": null,
+  "createdAt": "2026-09-16",
+  "creator": "wait",
+  "description": "",
+  "dev_type": null,
+  "id": "fourth-round-opt",
+  "meta": {},
+  "name": "fourth-round-opt",
+  "notes": "",
+  "package": null,
+  "parent": null,
+  "pr_url": null,
+  "priority": "P1",
+  "relatedFiles": [],
+  "scope": null,
+  "status": "planning",
+  "subtasks": [],
+  "title": "第四轮优化：合并粘贴×搜索语法×内存渲染×统计维护",
+  "worktree_path": null
+}
