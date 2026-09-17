@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.2.6](https://github.com/mecoren/EcoPaste/compare/v1.2.5...v1.2.6) (2026-09-17)
+
+### ✨ Features
+
+* merge multiple text items into a single paste, with automatic pasted-text cleanup
+
+### 🐛 Bug Fixes
+
+* reopening the clipboard window now loads items copied while it was hidden, no tab switch needed to refresh
+
 ## [1.2.5](https://github.com/mecoren/EcoPaste/compare/v1.2.4...v1.2.5) (2026-09-15)
 
 ### ✨ Features
