@@ -24,6 +24,21 @@ use crate::settings::{Capture, CaptureKind, Sensitive};
 /// 超过此长度的文本会被截断，前端列表只渲染摘要，预览/写回时再读完整 `content`。
 pub(crate) const SUMMARY_MAX_CHARS: usize = 256;
 
+/// 把文本中的 CRLF（`\r\n`）与孤立 CR（`\r`）统一归一为 LF（`\n`）。
+///
+/// 不同来源应用写入剪贴板的换行口径不一（Windows 应用常见 `\r\n`，浏览器/编辑器常见
+/// `\n`），同一份可见内容会因换行差异算出不同的 `content_hash` 而重复入库、长度不一；
+/// 孤立 `\r` 还会在列表渲染与粘贴结果里表现为内容中段冒出的回车。入库前统一为 `\n`：
+/// HTML 解析与 RTF 读取本就会把 CRLF/CR 当作 `\n` 或空白处理，纯文本粘贴的兼容性也更稳。
+/// 文本去重哈希（[`crate::db::items::content_hash`]）与编辑保存路径共用同一口径。
+pub fn normalize_text_breaks(text: &str) -> String {
+    if !text.contains('\r') {
+        return text.to_owned();
+    }
+
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 /// 从纯文本生成列表摘要：trim 后按 [`SUMMARY_MAX_CHARS`] 字符截断。
 /// 输入空串返回 `None`。HTML/RTF 也用这个，输入是 OS 同时提供的纯文本，不解析富文本。
 /// 文本条目编辑保存时同样用它重建 `summary`，保证两条路径的截断规则一致。
@@ -78,14 +93,22 @@ fn files_to_content(files: &[String]) -> String {
 ///   `search_text` 存 `None`（与 content 同串的双写已消除，FTS 索引在触发器里
 ///   COALESCE 到 content，见 migration 0004）。
 ///
+/// `plain_full` 是调用方已做换行归一的完整纯文本（含首尾空白），此处只做 trim 判空；
+/// HTML/RTF 源在入库前同样过 [`normalize_text_breaks`]。
+///
 /// 一律以 trim 后的纯文本作为「是否有可展示内容」的判据：纯文本为空就直接 `None`，
 /// 不管 HTML/RTF 源是否存在（只有样式/空白节点的源对用户没意义，列表也渲染不出来）。
-fn draft_from_text(text: &TextPayload, capture: &Capture, plain_only: bool) -> Option<Draft> {
+fn draft_from_text(
+    text: &TextPayload,
+    plain_full: &str,
+    capture: &Capture,
+    plain_only: bool,
+) -> Option<Draft> {
     if !capture.text && !capture.html && !capture.rtf {
         return None;
     }
 
-    let plain = text.text.trim();
+    let plain = plain_full.trim();
     if plain.is_empty() {
         return None;
     }
@@ -93,8 +116,8 @@ fn draft_from_text(text: &TextPayload, capture: &Capture, plain_only: bool) -> O
     let plain_search = Some(plain.to_owned());
     let summary = make_summary(plain);
 
-    let html = non_empty(&text.html);
-    let rtf = non_empty(&text.rtf);
+    let html = non_empty(&text.html).map(|s| normalize_text_breaks(s));
+    let rtf = non_empty(&text.rtf).map(|s| normalize_text_breaks(s));
 
     if !plain_only {
         for kind in capture.ordered_kinds() {
@@ -105,31 +128,35 @@ fn draft_from_text(text: &TextPayload, capture: &Capture, plain_only: bool) -> O
             match kind {
                 CaptureKind::Html => {
                     if let Some(html) = html {
+                        let size = count_text_bytes(&html);
+
                         return Some(Draft {
                             kind: ClipboardKind::Text,
                             sub_kind: Some(ClipboardSubKind::Html),
-                            content: html.clone(),
+                            content: html,
                             search_text: plain_search.clone(),
                             summary: summary.clone(),
                             file_types: None,
                             width: None,
                             height: None,
-                            size: Some(count_text_bytes(html)),
+                            size: Some(size),
                         });
                     }
                 }
                 CaptureKind::Rtf => {
                     if let Some(rtf) = rtf {
+                        let size = count_text_bytes(&rtf);
+
                         return Some(Draft {
                             kind: ClipboardKind::Text,
                             sub_kind: Some(ClipboardSubKind::Rtf),
-                            content: rtf.clone(),
+                            content: rtf,
                             search_text: plain_search.clone(),
                             summary: summary.clone(),
                             file_types: None,
                             width: None,
                             height: None,
-                            size: Some(count_text_bytes(rtf)),
+                            size: Some(size),
                         });
                     }
                 }
@@ -205,7 +232,8 @@ pub fn build_item_with_settings(
     let mut is_sensitive = false;
     let draft = match payload {
         ClipboardPayload::Text(text) => {
-            if contains_secret(&text.text) {
+            let plain_full = normalize_text_breaks(&text.text);
+            if contains_secret(&plain_full) {
                 if !sensitive.collect_secrets {
                     return Ok(None);
                 }
@@ -213,7 +241,7 @@ pub fn build_item_with_settings(
                 is_sensitive = true;
             }
 
-            draft_from_text(text, capture, plain_only)
+            draft_from_text(text, &plain_full, capture, plain_only)
         }
         ClipboardPayload::Files(files) => {
             if !capture.files {
@@ -847,6 +875,43 @@ mod tests {
         assert!(build_item(&s, &text_payload("  \n\t", None, None))
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn normalize_text_breaks_maps_crlf_and_cr_to_lf() {
+        assert_eq!(normalize_text_breaks("a\r\nb\rc\nd"), "a\nb\nc\nd");
+        assert_eq!(normalize_text_breaks("no breaks"), "no breaks");
+        assert_eq!(normalize_text_breaks(""), "");
+    }
+
+    #[test]
+    fn plain_text_content_is_normalized_at_ingest() {
+        let (_d, s) = store();
+        let item = build_item(&s, &text_payload("line1\r\nline2\rline3", None, None))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(item.content, "line1\nline2\nline3");
+        assert_eq!(item.size, Some(17));
+        assert_eq!(
+            item.content_hash,
+            content_hash(ClipboardKind::Text, "line1\nline2\nline3")
+        );
+    }
+
+    #[test]
+    fn html_source_and_search_text_are_normalized() {
+        let (_d, s) = store();
+        let item = build_item(
+            &s,
+            &text_payload("Hello\r\nWorld", Some("<p>Hello</p>\r\n<p>World</p>"), None),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(item.sub_kind, Some(ClipboardSubKind::Html));
+        assert_eq!(item.content, "<p>Hello</p>\n<p>World</p>");
+        assert_eq!(item.search_text.as_deref(), Some("Hello\nWorld"));
     }
 
     // ---- 测试辅助 ----

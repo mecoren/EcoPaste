@@ -1,16 +1,24 @@
-//! OS 级剪贴板监听：把 [`clipboard_rs`] 的 watcher 接到「读取 → 去重入库 → emit」闭环。
+//! OS 级剪贴板监听：把 [`clipboard_rs`] 的 watcher 接到「防抖 → 读取 → 去重入库 → emit」闭环。
 //!
 //! [`clipboard_rs`] 内部已实现 macOS（`NSPasteboard.changeCount` 轮询）/ Windows
 //! （`AddClipboardFormatListener` → `WM_CLIPBOARDUPDATE`）的平台监听，这里不重复造。
 //!
-//! 线程模型：`ClipboardWatcherContext::start_watch()` 是阻塞调用，故整个监听跑在独立
-//! `std::thread` 上。`ClipboardContext` 等平台句柄**在该线程内构造**，不跨线程移动，
-//! 从而绕开其 `Send` 约束；只有 `Send` 的数据（`AppHandle`、`item`）会被
-//! 投递进 Tauri 异步运行时做 sqlx 入库与事件 emit。
+//! 线程模型：监听跑在两个线程上。
+//! - **watcher 线程**：跑 [`ClipboardWatcherContext::start_watch()`]（阻塞调用），回调里
+//!   只做「暂停判定 → 抓前台应用 → 过滤名单判定 → 投递信号」，立刻返回，不碰剪贴板数据。
+//! - **ingest 线程**：消费信号做防抖（见 [`CLIPBOARD_DEBOUNCE`]），静默后在本线程内
+//!   构造 [`ClipboardReader`] 读取并入库。`ClipboardContext` 等平台句柄在该线程内构造，
+//!   不跨线程移动，绕开其 `Send` 约束；只有 `Send` 的数据会被投递进 Tauri 异步运行时。
+//!
+//! 防抖是必须的：不少 Windows 应用分多次写剪贴板（先 `CF_UNICODETEXT`，隔几十毫秒再补
+//! `HTML Format` / RTF，每次 `CloseClipboard` 都触发一条 `WM_CLIPBOARDUPDATE`）。若每次
+//! 都立即读取入库，同一份内容会先入一条纯文本、再入一条富文本——两条记录可见字符相同
+//! 而长度不同。静默窗口内只处理最后状态，多次写入合并为一次采集。
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use clipboard_rs::{ClipboardHandler, ClipboardWatcher, ClipboardWatcherContext};
@@ -35,9 +43,17 @@ use crate::settings::SettingsStore;
 pub const CLIPBOARD_UPDATED_EVENT: &str = "clipboard://updated";
 
 /// macOS 轮询 `changeCount` 的间隔。上游 clipboard-rs 默认 500ms，对复制响应（尤其图片）
-/// 偏慢；我们 fork 出 `new_with_interval` 后调到 120ms，跟手且 CPU 开销可忽略。
+/// 偏慢；fork 后的 `new_with_interval` 调到 120ms，跟手且 CPU 开销可忽略。
 /// Windows 走事件驱动（`WM_CLIPBOARDUPDATE`），此值被忽略。
 const CLIPBOARD_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
+
+/// 剪贴板变更防抖静默窗口：窗口内再无新变更才读取入库，新变更会重置窗口。
+/// 覆盖源应用分多次写剪贴板的间隙（先纯文本、再补 HTML/RTF，通常几十毫秒），
+/// 代价是每次复制到入库最多延迟一个窗口。
+const CLIPBOARD_DEBOUNCE: Duration = Duration::from_millis(200);
+
+/// 防抖窗口的总上限：持续高频写剪贴板（如两个剪贴板管理器互斗）不能无限饿死入库。
+const CLIPBOARD_DEBOUNCE_MAX_WAIT: Duration = Duration::from_millis(1000);
 
 /// Another clipboard listener can briefly hold the Windows clipboard open. Retry those read
 /// failures within a bounded window before dropping the update.
@@ -235,30 +251,27 @@ pub fn init(app: &AppHandle) -> crate::core::Result<()> {
     }
 
     super::cleanup::spawn(app.clone());
-    spawn_watch_thread(app.clone(), guard, store, app_icon_store, registry, pause);
+
+    // 事件信号通道：watcher 线程投递「剪贴板变了 + 事件当下的前台应用」，
+    // ingest 线程消费并防抖。通道关闭（两侧线程结束）即进程退出场景。
+    let (pending_tx, pending_rx) = std::sync::mpsc::channel::<Option<FrontmostApp>>();
+    spawn_ingest_thread(
+        app.clone(),
+        guard,
+        store,
+        app_icon_store,
+        registry,
+        pause.clone(),
+        pending_rx,
+    );
+    spawn_watch_thread(app.clone(), pending_tx, pause);
     Ok(())
 }
 
-fn spawn_watch_thread(
-    app: AppHandle,
-    guard: Arc<WritebackGuard>,
-    store: ImageStore,
-    app_icon_store: AppIconStore,
-    registry: AppsRegistry,
-    pause: WatcherPause,
-) {
+fn spawn_watch_thread(app: AppHandle, pending: Sender<Option<FrontmostApp>>, pause: WatcherPause) {
     std::thread::Builder::new()
         .name("clipboard-watcher".to_owned())
         .spawn(move || {
-            // 平台剪贴板句柄在本线程内构造，不跨线程移动。
-            let reader = match ClipboardReader::new() {
-                Ok(reader) => reader,
-                Err(err) => {
-                    log::error!("clipboard watcher: failed to create reader: {err}");
-                    return;
-                }
-            };
-
             let mut watcher =
                 match ClipboardWatcherContext::new_with_interval(CLIPBOARD_POLL_INTERVAL) {
                     Ok(watcher) => watcher,
@@ -269,12 +282,8 @@ fn spawn_watch_thread(
                 };
 
             watcher.add_handler(ClipboardChangeHandler {
-                reader,
                 app,
-                guard,
-                store,
-                app_icon_store,
-                registry,
+                pending,
                 pause,
             });
 
@@ -285,13 +294,167 @@ fn spawn_watch_thread(
         .expect("failed to spawn clipboard watcher thread");
 }
 
-struct ClipboardChangeHandler {
-    reader: ClipboardReader,
+/// ingest 线程：防抖消费剪贴板变更信号，静默后读取 + 入库。
+/// 平台剪贴板句柄在本线程内构造，不跨线程移动。
+fn spawn_ingest_thread(
     app: AppHandle,
     guard: Arc<WritebackGuard>,
     store: ImageStore,
     app_icon_store: AppIconStore,
     registry: AppsRegistry,
+    pause: WatcherPause,
+    pending: Receiver<Option<FrontmostApp>>,
+) {
+    std::thread::Builder::new()
+        .name("clipboard-ingest".to_owned())
+        .spawn(move || {
+            let reader = match ClipboardReader::new() {
+                Ok(reader) => reader,
+                Err(err) => {
+                    log::error!("clipboard ingest: failed to create reader: {err}");
+                    return;
+                }
+            };
+
+            loop {
+                let Ok(first) = pending.recv() else {
+                    return;
+                };
+                let source = debounce_updates(
+                    &pending,
+                    first,
+                    CLIPBOARD_DEBOUNCE,
+                    CLIPBOARD_DEBOUNCE_MAX_WAIT,
+                );
+
+                // 防抖等待期间用户可能已关闭「监听」：丢弃整批变更。
+                if pause.is_paused() {
+                    continue;
+                }
+
+                process_clipboard_update(
+                    &app,
+                    &reader,
+                    &guard,
+                    &store,
+                    &app_icon_store,
+                    &registry,
+                    source,
+                );
+            }
+        })
+        .expect("failed to spawn clipboard ingest thread");
+}
+
+/// 防抖：静默 [`CLIPBOARD_DEBOUNCE`] 内再无新变更才返回，期间到达的新变更重置窗口
+/// （总时长受 [`CLIPBOARD_DEBOUNCE_MAX_WAIT`] 约束），前台应用取最后一刻的值。
+/// 纯通道操作，不触碰剪贴板。
+fn debounce_updates(
+    pending: &Receiver<Option<FrontmostApp>>,
+    first: Option<FrontmostApp>,
+    quiet: Duration,
+    max_wait: Duration,
+) -> Option<FrontmostApp> {
+    let mut latest = first;
+    let started = Instant::now();
+
+    loop {
+        let remaining = max_wait.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return latest;
+        }
+
+        match pending.recv_timeout(quiet.min(remaining)) {
+            Ok(source) => latest = source,
+            Err(RecvTimeoutError::Timeout) => return latest,
+            // 通道关闭：把手头的变更处理完，下一轮 recv 会让线程退出。
+            Err(RecvTimeoutError::Disconnected) => return latest,
+        }
+    }
+}
+
+/// 防抖静默后处理一次剪贴板变更：读取 → 转换 → 回环抑制 → 入库 emit。
+/// `source` 是事件当下（而非此刻）探测到的前台应用。
+fn process_clipboard_update(
+    app: &AppHandle,
+    reader: &ClipboardReader,
+    guard: &Arc<WritebackGuard>,
+    store: &ImageStore,
+    app_icon_store: &AppIconStore,
+    registry: &AppsRegistry,
+    source: Option<FrontmostApp>,
+) {
+    // 防抖后重新快照：过滤名单在事件回调已判定，这里取 capture / sensitive 的最新值。
+    let settings = app
+        .try_state::<SettingsStore>()
+        .map(|s| s.snapshot())
+        .unwrap_or_default();
+
+    // 同步读取 + 转换（含图片落盘）：拿到 content_hash 才能判定是否为自身写回。
+    // 读取带序列号一致性校验 + 重试梯子：读取期间剪贴板被并发改写（撕裂载荷）或
+    // 被其他监听器短暂锁住，都按失败重读，拿到稳定后的最终状态。
+    let payload = match read_with_retry(&CLIPBOARD_READ_RETRY_DELAYS, || {
+        reader.read_with_capture_stable(&settings.clipboard.capture)
+    }) {
+        Ok(Some(payload)) => payload,
+        Ok(None) => return,
+        Err(err) => {
+            log::warn!("clipboard watcher: read failed: {err}");
+            return;
+        }
+    };
+
+    let mut item = match build_item_with_settings(
+        store,
+        &payload,
+        &settings.clipboard.capture,
+        &settings.clipboard.sensitive,
+        settings.clipboard.content.copy_plain,
+    ) {
+        Ok(Some(item)) => item,
+        Ok(None) => return,
+        Err(err) => {
+            log::warn!("clipboard watcher: build item failed: {err}");
+            return;
+        }
+    };
+
+    // 自身写回触发的变更：跳过入库，避免回环。
+    if guard.should_skip(&item.content_hash) {
+        return;
+    }
+
+    let (source_app, cached) = match source.as_ref().map(|src| {
+        let (app, cached) = materialize_source(registry, src.clone());
+        (app, cached)
+    }) {
+        Some((app, cached)) => (Some(app), cached),
+        None => (None, true),
+    };
+    if let Some(src) = &source_app {
+        item.source_app_id = Some(src.id.clone());
+    }
+
+    // 入库与 emit 交给异步运行时；只移动 Send 数据，不碰平台句柄。
+    // 缓存未命中的来源应用：把原始探测结果移进异步任务补抽 icon（监听线程零 OS 抽取）。
+    let app = app.clone();
+    let app_icon_store = app_icon_store.clone();
+    let registry = registry.clone();
+    let pending_icon_source = if cached { None } else { source };
+    tauri::async_runtime::spawn(async move {
+        if let Some(src) = pending_icon_source {
+            spawn_materialize_icon(&app, &app_icon_store, &registry, src);
+        }
+        let pool = app.state::<crate::db::DatabaseState>().pool().await;
+        if let Err(err) = persist_and_notify(&app, &pool, item, source_app.as_ref()).await {
+            log::error!("clipboard watcher: persist failed: {err}");
+        }
+    });
+}
+
+struct ClipboardChangeHandler {
+    app: AppHandle,
+    pending: Sender<Option<FrontmostApp>>,
     pause: WatcherPause,
 }
 
@@ -302,22 +465,18 @@ impl ClipboardHandler for ClipboardChangeHandler {
             return;
         }
 
-        // **先**抓前台应用：等异步入库再问，前台早就切回我们自己了。
-        // 自身写回的事件会在下方 guard 处被丢弃，但 detect 仍会无害地返回我们自己的 bundle id——
-        // 顺序换不得：guard 判定依赖 content_hash，必须先把 payload 读出来才能判，
-        // 而 read_all 期间用户可能已经切走前台。
+        // **先**抓前台应用：防抖 + 异步入库之后前台早就切回我们自己了。
+        // 自身写回的事件会在 ingest 线程的 guard 处被丢弃，但 detect 仍会无害地返回
+        // 我们自己的 bundle id。
         let source = source::detect_frontmost();
 
-        // 用户在偏好里勾选了「过滤此应用」时，本次复制整条直接丢弃——不读取、不入库、不 emit。
-        // 提前到读 payload 前判定，省掉无效的 OS 调用 + 图片解码开销。
-        // 快照只取一次：排除名单判定与下方 capture / sensitive 读取共用，
-        // 避免每次复制对 Vec 密集的 Settings 结构做两遍深拷贝。
+        // 用户在偏好里勾选了「过滤此应用」时，本次复制整条直接丢弃——不投递、不读取、不入库。
+        // 回调只做轻量判定，设置快照留给 ingest 线程（防抖后用最新值读取）。
         let settings = self
             .app
             .try_state::<SettingsStore>()
             .map(|s| s.snapshot())
             .unwrap_or_default();
-
         if let Some(src) = &source {
             if settings
                 .clipboard
@@ -330,64 +489,9 @@ impl ClipboardHandler for ClipboardChangeHandler {
             }
         }
 
-        // 同步读取 + 转换（含图片落盘）：拿到 content_hash 才能判定是否为自身写回。
-        let payload = match read_with_retry(&CLIPBOARD_READ_RETRY_DELAYS, || {
-            self.reader.read_with_capture(&settings.clipboard.capture)
-        }) {
-            Ok(Some(payload)) => payload,
-            Ok(None) => return,
-            Err(err) => {
-                log::warn!("clipboard watcher: read failed: {err}");
-                return;
-            }
-        };
-
-        let mut item = match build_item_with_settings(
-            &self.store,
-            &payload,
-            &settings.clipboard.capture,
-            &settings.clipboard.sensitive,
-            settings.clipboard.content.copy_plain,
-        ) {
-            Ok(Some(item)) => item,
-            Ok(None) => return,
-            Err(err) => {
-                log::warn!("clipboard watcher: build item failed: {err}");
-                return;
-            }
-        };
-
-        // 自身写回触发的变更：跳过入库，避免回环。
-        if self.guard.should_skip(&item.content_hash) {
-            return;
-        }
-
-        let (source_app, cached) = match source.as_ref().map(|src| {
-            let (app, cached) = materialize_source(&self.registry, src.clone());
-            (app, cached)
-        }) {
-            Some((app, cached)) => (Some(app), cached),
-            None => (None, true),
-        };
-        if let Some(src) = &source_app {
-            item.source_app_id = Some(src.id.clone());
-        }
-
-        // 入库与 emit 交给异步运行时；只移动 Send 数据，不碰平台句柄。
-        // 缓存未命中的来源应用：把原始探测结果移进异步任务补抽 icon（监听线程零 OS 抽取）。
-        let app = self.app.clone();
-        let app_icon_store = self.app_icon_store.clone();
-        let registry = self.registry.clone();
-        let pending_icon_source = if cached { None } else { source };
-        tauri::async_runtime::spawn(async move {
-            if let Some(src) = pending_icon_source {
-                spawn_materialize_icon(&app, &app_icon_store, &registry, src);
-            }
-            let pool = app.state::<crate::db::DatabaseState>().pool().await;
-            if let Err(err) = persist_and_notify(&app, &pool, item, source_app.as_ref()).await {
-                log::error!("clipboard watcher: persist failed: {err}");
-            }
-        });
+        // 只投递信号，重活（防抖 + 读取 + 入库）由 ingest 线程做，让 watcher 的
+        // 消息循环立刻回到 recv，防抖窗口内的后续变更得以排队。
+        let _ = self.pending.send(source);
     }
 }
 
@@ -403,6 +507,72 @@ mod tests {
     use crate::db::test_support::memory_pool;
 
     const ZERO_DELAY_RETRIES: [Duration; 3] = [Duration::ZERO; 3];
+
+    fn frontmost(id: &str) -> Option<FrontmostApp> {
+        Some(FrontmostApp {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            platform: crate::db::models::Platform::Macos,
+            icon_path: None,
+        })
+    }
+
+    #[test]
+    fn debounce_returns_last_source_after_quiet_window() {
+        let (tx, rx) = std::sync::mpsc::channel::<Option<FrontmostApp>>();
+
+        tx.send(frontmost("a")).unwrap();
+        tx.send(frontmost("b")).unwrap();
+
+        // 首个事件已消费（作为 first 传入），窗口内到达的 a/b 合并，取最后一刻的 b。
+        let latest = debounce_updates(&rx, None, Duration::from_millis(50), Duration::from_secs(1));
+
+        assert_eq!(latest.as_ref().map(|s| s.id.as_str()), Some("b"));
+    }
+
+    #[test]
+    fn debounce_returns_sole_event_after_quiet_window() {
+        let (tx, rx) = std::sync::mpsc::channel::<Option<FrontmostApp>>();
+        tx.send(frontmost("solo")).unwrap();
+        drop(tx);
+
+        let latest = debounce_updates(
+            &rx,
+            frontmost("solo"),
+            Duration::from_millis(50),
+            Duration::from_secs(1),
+        );
+
+        assert_eq!(latest.as_ref().map(|s| s.id.as_str()), Some("solo"));
+    }
+
+    #[test]
+    fn debounce_gives_up_after_max_wait_under_continuous_writes() {
+        let (tx, rx) = std::sync::mpsc::channel::<Option<FrontmostApp>>();
+        let writer = std::thread::spawn(move || {
+            for i in 0..50 {
+                let _ = tx.send(frontmost(&format!("event-{i}")));
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        let started = Instant::now();
+        let latest = debounce_updates(
+            &rx,
+            frontmost("first"),
+            Duration::from_millis(80),
+            Duration::from_millis(200),
+        );
+        let elapsed = started.elapsed();
+
+        writer.join().unwrap();
+        assert!(latest.is_some());
+        // 持续写入会不断重置静默窗口，总上限必须兜底，不能无限饿死。
+        assert!(
+            elapsed < Duration::from_millis(800),
+            "debounce should cap at max_wait, got {elapsed:?}"
+        );
+    }
 
     #[test]
     fn clipboard_read_retry_returns_immediate_success() {

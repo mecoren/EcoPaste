@@ -28,7 +28,7 @@ pub use icon::{get_icon_cache_key, icon_png, DIR_CACHE_KEY};
 #[cfg(test)]
 pub use ingest::build_item;
 pub use ingest::build_item_with_settings;
-pub use ingest::{exceeds_limit, make_summary};
+pub use ingest::{exceeds_limit, make_summary, normalize_text_breaks};
 pub use paste::{apply_paste_transform, join_merge_texts, order_merge_parts, PasteTransform};
 pub use payload::{ClipboardPayload, ImagePayload, TextPayload};
 pub use read::ClipboardReader;

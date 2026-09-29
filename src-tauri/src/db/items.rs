@@ -49,13 +49,22 @@ pub struct UpsertResult {
 
 /// 计算去重指纹：`blake3("<kind>:<content>")`。
 /// 加 `kind` 前缀，避免 text 与 files 恰好同串内容被误判为重复。
-/// text 直接哈希内容串即可；image/files 的 `content` 是落盘引用/路径，
-/// 调用方持有原始字节时可改为对原始内容字节哈希后写入 `content_hash`。
+/// text 在哈希前先归一换行（[`crate::clipboard::normalize_text_breaks`]）：不同来源应用
+/// 对同一份可见内容可能分别写入 `\r\n` / `\n`，按原串哈希会把它们当成两条记录；
+/// 归一后同内容必然同指纹，写回回环抑制、编辑保存与监听采集天然共用同一口径。
+/// image（落盘文件名）/ files（路径串，`\r` 在路径里合法且字节敏感）不归一。
 pub fn content_hash(kind: ClipboardKind, content: &str) -> String {
     let mut hasher = Hasher::new();
     hasher.update(kind_tag(kind).as_bytes());
     hasher.update(b":");
-    hasher.update(content.as_bytes());
+    match kind {
+        ClipboardKind::Text => {
+            hasher.update(crate::clipboard::normalize_text_breaks(content).as_bytes());
+        }
+        ClipboardKind::Image | ClipboardKind::Files => {
+            hasher.update(content.as_bytes());
+        }
+    }
     hasher.finalize().to_hex().to_string()
 }
 
@@ -70,6 +79,11 @@ fn kind_tag(kind: ClipboardKind) -> &'static str {
 /// 入库主入口：按 `item.content_hash` 去重。
 /// 命中已有记录 → 复用 [`increment_item_use_count`] 累加并刷新 `updated_at`，不插入新行；
 /// 未命中 → 调用 [`insert_item`] 插入。返回生效行 id 与是否去重。
+///
+/// 文本条目在哈希未命中时还有一层**跨表示去重**：同一段可见文字先后以纯文本 /
+/// HTML / RTF 复制，`content_hash` 互不相同，但「纯文本投影」（见
+/// [`find_item_by_plain_projection`]）一致——同样提升既有条目而非新插一行。
+/// 既有条目的表示保持首次采集的原样不动（收藏、备注等元数据也原样保留）。
 pub async fn upsert_item(pool: &SqlitePool, item: &ClipboardItem) -> Result<UpsertResult> {
     if let Some(existing) = find_item_by_content_hash(pool, &item.content_hash).await? {
         increment_item_use_count(pool, &existing.id).await?;
@@ -77,6 +91,20 @@ pub async fn upsert_item(pool: &SqlitePool, item: &ClipboardItem) -> Result<Upse
             id: existing.id,
             deduplicated: true,
         });
+    }
+
+    if item.kind == ClipboardKind::Text {
+        let plain = item
+            .search_text
+            .clone()
+            .unwrap_or_else(|| item.content.clone());
+        if let Some(existing) = find_item_by_plain_projection(pool, &plain).await? {
+            increment_item_use_count(pool, &existing.id).await?;
+            return Ok(UpsertResult {
+                id: existing.id,
+                deduplicated: true,
+            });
+        }
     }
 
     insert_item(pool, item).await?;
@@ -102,6 +130,109 @@ pub async fn find_item_by_content_hash(
         .await
         .context("failed to find clipboard item by content_hash")?;
     Ok(item)
+}
+
+/// 按「纯文本投影」查最近一条 text 记录：纯文本行投影即 `content`（search_text 为
+/// NULL，migration 0004），HTML/RTF 行投影为 OS 提供的纯文本表示 `search_text`。
+/// 命中 `idx_clipboard_items_plain_projection` 部分表达式索引，供跨表示去重补查。
+/// 调用方传入的投影须与入库口径一致（已 trim、换行已归一），此处做全等比较。
+pub async fn find_item_by_plain_projection(
+    pool: &SqlitePool,
+    plain: &str,
+) -> Result<Option<ClipboardItem>> {
+    let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(SELECT_ITEM);
+    qb.push(" WHERE kind = 'text' AND COALESCE(search_text, content) = ")
+        .push_bind(plain.to_owned())
+        .push(" ORDER BY created_at DESC LIMIT 1");
+
+    let item = qb
+        .build_query_as::<ClipboardItem>()
+        .fetch_optional(pool)
+        .await
+        .context("failed to find clipboard item by plain projection")?;
+    Ok(item)
+}
+
+/// 一次性历史数据修复：把已发布版本入库的文本行中残留的 `\r\n` / `\r` 归一为 `\n`，
+/// 同步重算 `content_hash` / `size`，让存量行与当前采集/去重口径对齐——否则升级后
+/// 同一份内容再复制时，新哈希（归一口径）命不中旧哈希（原串口径），又会重复入库。
+/// FTS 索引由 UPDATE 触发器自动重建；不刷新 `updated_at`（修复不改使用排序）。
+///
+/// 只扫描含 CR 的行（按 id 分页推进，避免整表载入内存），幂等可重复执行；
+/// 归一后哈希与其他行撞车的行跳过——那两条历史本就同文异形，保留原样即可，
+/// 后续复制会去重到撞车的那条上。
+pub async fn normalize_legacy_text_breaks(pool: &SqlitePool) -> Result<u64> {
+    let mut fixed = 0u64;
+    let mut last_id = String::new();
+
+    loop {
+        let rows: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT id, content, search_text, summary FROM clipboard_items \
+             WHERE kind = 'text' AND id > ? AND (content LIKE '%' || char(13) || '%' \
+               OR search_text LIKE '%' || char(13) || '%' \
+               OR summary LIKE '%' || char(13) || '%') \
+             ORDER BY id LIMIT 100",
+        )
+        .bind(&last_id)
+        .fetch_all(pool)
+        .await
+        .context("failed to scan clipboard items for legacy line breaks")?;
+
+        if rows.is_empty() {
+            break;
+        }
+
+        for (id, content, search_text, summary) in rows {
+            last_id = id.clone();
+
+            let normalized_content = crate::clipboard::normalize_text_breaks(&content);
+            let normalized_search = search_text
+                .as_deref()
+                .map(crate::clipboard::normalize_text_breaks);
+            let normalized_summary = summary
+                .as_deref()
+                .map(crate::clipboard::normalize_text_breaks);
+            if normalized_content == content
+                && normalized_search.as_deref() == search_text.as_deref()
+                && normalized_summary.as_deref() == summary.as_deref()
+            {
+                continue;
+            }
+
+            let hash = content_hash(ClipboardKind::Text, &normalized_content);
+            // 撞车判定必须排除本行：归一后的哈希若已挂在「另一行」上，改写会造成同指纹两行。
+            let collides = sqlx::query_scalar::<_, i64>(
+                "SELECT EXISTS(SELECT 1 FROM clipboard_items WHERE content_hash = ? AND id != ?)",
+            )
+            .bind(&hash)
+            .bind(&id)
+            .fetch_one(pool)
+            .await
+            .context("failed to check content_hash collision")?
+                != 0;
+            if collides {
+                continue;
+            }
+
+            sqlx::query(
+                "UPDATE clipboard_items \
+                 SET content = ?, content_hash = ?, search_text = ?, summary = ?, size = ? \
+                 WHERE id = ?",
+            )
+            .bind(&normalized_content)
+            .bind(&hash)
+            .bind(&normalized_search)
+            .bind(&normalized_summary)
+            .bind(normalized_content.len() as i64)
+            .bind(&id)
+            .execute(pool)
+            .await
+            .context("failed to normalize legacy clipboard text")?;
+            fixed += 1;
+        }
+    }
+
+    Ok(fixed)
 }
 
 /// 插入一条剪贴板记录（不做去重；去重请走 [`upsert_item`]）。
@@ -302,7 +433,8 @@ pub async fn update_item_text(
     id: &str,
     content: &str,
 ) -> Result<UpdateTextOutcome> {
-    let hash = content_hash(ClipboardKind::Text, content);
+    let content = crate::clipboard::normalize_text_breaks(content);
+    let hash = content_hash(ClipboardKind::Text, &content);
     let trimmed = content.trim();
     let summary = crate::clipboard::make_summary(trimmed);
     let sub_kind = crate::clipboard::detect_text_sub_kind(trimmed);
@@ -891,6 +1023,57 @@ mod tests {
         assert_eq!(all.len(), 2);
     }
 
+    #[tokio::test]
+    async fn upsert_promotes_existing_entry_across_representations() {
+        let pool = memory_pool().await;
+        // 既有条目：纯文本。
+        let mut plain = sample_item("plain");
+        plain.content = "hello world".to_owned();
+        plain.content_hash = content_hash(ClipboardKind::Text, &plain.content);
+        insert_item(&pool, &plain).await.unwrap();
+
+        // 同一段文字以 HTML 表示再次复制：content 是 HTML 源（哈希必不命中），
+        // 但 search_text 纯文本投影一致 → 提升既有行，不插新行。
+        let mut html = sample_item("html");
+        html.sub_kind = Some(crate::db::models::ClipboardSubKind::Html);
+        html.content = "<b>hello world</b>".to_owned();
+        html.content_hash = content_hash(ClipboardKind::Text, &html.content);
+        html.search_text = Some("hello world".to_owned());
+        let result = upsert_item(&pool, &html).await.unwrap();
+
+        assert!(result.deduplicated);
+        assert_eq!(result.id, "plain");
+        let all = query_items(&pool, &ClipboardItemQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(ids(&all), ["plain"]);
+        assert_eq!(all[0].use_count, 2);
+        // 既有条目的表示保持原样，不被新复制改写（query_items 的 text content 已裁剪，走单条查询）。
+        let kept = find_item_by_id(&pool, "plain")
+            .await
+            .unwrap()
+            .expect("promoted row should exist");
+        assert_eq!(kept.content, "hello world");
+
+        // 反向：RTF 表示再次复制（哈希不同、投影相同）同样提升，且不区分表示方向。
+        let mut rtf = sample_item("rtf");
+        rtf.sub_kind = Some(crate::db::models::ClipboardSubKind::Rtf);
+        rtf.content = r"{\rtf1 hello world}".to_owned();
+        rtf.content_hash = content_hash(ClipboardKind::Text, &rtf.content);
+        rtf.search_text = Some("hello world".to_owned());
+        let result = upsert_item(&pool, &rtf).await.unwrap();
+
+        assert!(result.deduplicated);
+        assert_eq!(result.id, "plain");
+        assert_eq!(
+            query_items(&pool, &ClipboardItemQuery::default())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
     #[test]
     fn query_default_sorts_by_updated_at() {
         assert_eq!(
@@ -916,6 +1099,91 @@ mod tests {
             content_hash(ClipboardKind::Text, "same"),
             content_hash(ClipboardKind::Files, "same")
         );
+    }
+
+    #[test]
+    fn content_hash_normalizes_text_line_breaks_but_not_files() {
+        // 换行口径不同（\r\n vs \n）的同一份可见文本 → 同哈希，去重命中而非重复入库。
+        assert_eq!(
+            content_hash(ClipboardKind::Text, "a\r\nb\rc"),
+            content_hash(ClipboardKind::Text, "a\nb\nc")
+        );
+        // files 的 content 是路径串，字节敏感，不归一。
+        assert_ne!(
+            content_hash(ClipboardKind::Files, "a\r\nb"),
+            content_hash(ClipboardKind::Files, "a\nb")
+        );
+    }
+
+    #[tokio::test]
+    async fn normalize_legacy_text_breaks_rewrites_cr_rows() {
+        let pool = memory_pool().await;
+        let mut legacy = sample_item("legacy");
+        legacy.content = "line1\r\nline2\rline3".to_owned();
+        legacy.content_hash = blake3_legacy_hash(&legacy.content);
+        legacy.summary = Some("line1\r\nline2".to_owned());
+        legacy.size = Some(legacy.content.len() as i64);
+        insert_item(&pool, &legacy).await.unwrap();
+
+        let mut clean = sample_item("clean");
+        clean.content = "no cr here".to_owned();
+        insert_item(&pool, &clean).await.unwrap();
+
+        let fixed = normalize_legacy_text_breaks(&pool).await.unwrap();
+        assert_eq!(fixed, 1);
+
+        let row = find_item_by_id(&pool, "legacy")
+            .await
+            .unwrap()
+            .expect("legacy row should exist");
+        assert_eq!(row.content, "line1\nline2\nline3");
+        assert_eq!(
+            row.content_hash,
+            content_hash(ClipboardKind::Text, &row.content)
+        );
+        assert_eq!(row.summary.as_deref(), Some("line1\nline2"));
+        assert_eq!(row.size, Some(row.content.len() as i64));
+        // 修复后同内容的再次采集应直接命中去重。
+        let mut recopy = sample_item("recopy");
+        recopy.content = row.content.clone();
+        recopy.content_hash = row.content_hash.clone();
+        let result = upsert_item(&pool, &recopy).await.unwrap();
+        assert!(result.deduplicated);
+        assert_eq!(result.id, "legacy");
+
+        // 幂等：再跑一遍不再有可修复行。
+        assert_eq!(normalize_legacy_text_breaks(&pool).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn normalize_legacy_text_breaks_skips_hash_collisions() {
+        let pool = memory_pool().await;
+        // 已存在一条 LF 版本；存量 CRLF 行归一后会与之撞哈希，应原样保留。
+        let mut lf = sample_item("lf");
+        lf.content = "same text\n".to_owned();
+        lf.content_hash = content_hash(ClipboardKind::Text, &lf.content);
+        insert_item(&pool, &lf).await.unwrap();
+
+        let mut crlf = sample_item("crlf");
+        crlf.content = "same text\r\n".to_owned();
+        crlf.content_hash = blake3_legacy_hash(&crlf.content);
+        insert_item(&pool, &crlf).await.unwrap();
+
+        assert_eq!(normalize_legacy_text_breaks(&pool).await.unwrap(), 0);
+
+        let row = find_item_by_id(&pool, "crlf")
+            .await
+            .unwrap()
+            .expect("collision row should be kept as-is");
+        assert_eq!(row.content, "same text\r\n");
+    }
+
+    /// 复刻旧行为（原串哈希）构造存量行的 `content_hash`。
+    fn blake3_legacy_hash(content: &str) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"text:");
+        hasher.update(content.as_bytes());
+        hasher.finalize().to_hex().to_string()
     }
 
     #[tokio::test]

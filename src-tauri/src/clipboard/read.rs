@@ -69,6 +69,36 @@ impl ClipboardReader {
         Ok(None)
     }
 
+    /// 读取当前剪贴板并校验读取期间剪贴板未被并发改写。
+    ///
+    /// Windows 下读前后各取一次剪贴板序列号（`GetClipboardSequenceNumber`，不打开
+    /// 剪贴板、无锁竞争）：序列号变了说明读取期间有其他进程改写剪贴板——源应用
+    /// 分多段写（先纯文本再补 HTML）、或多个剪贴板监听器互相覆盖，都会让逐格式
+    /// `GetClipboardData` 拼出「半新半旧」的撕裂载荷。按失败返回，交给调用方的
+    /// 重试梯子重读，拿到的是稳定后的最终状态。
+    pub fn read_with_capture_stable(&self, capture: &Capture) -> Result<Option<ClipboardPayload>> {
+        #[cfg(target_os = "windows")]
+        {
+            let before =
+                unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() };
+            let payload = self.read_with_capture(capture);
+            let after =
+                unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() };
+            if before != after {
+                return Err(AppError::Clipboard(
+                    "clipboard changed during read".to_owned(),
+                ));
+            }
+
+            payload
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            self.read_with_capture(capture)
+        }
+    }
+
     /// 读取剪贴板文件路径列表；空列表视为无可用文件内容。
     fn read_files(&self) -> Result<Option<Vec<String>>> {
         if !self.ctx.has(ContentFormat::Files) {
