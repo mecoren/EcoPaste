@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.7](https://github.com/mecoren/EcoPaste/compare/v1.2.6...v1.2.7) (2026-09-29)
+
+### 🐛 Bug Fixes
+
+* one copy no longer produces duplicate history entries: multi-pass clipboard writes (plain text first, rich text added moments later) are coalesced into a single capture, and the clipboard is verified stable while reading to avoid torn captures
+* line-ending drift between apps no longer creates near-duplicate entries or stray carriage returns mid-text: CRLF/CR are normalized to LF on capture, with a one-time startup pass normalizing already-stored history
+* re-copying content already in the history now promotes the existing entry to the top (below pinned items) even when it arrives in a different text representation (plain/HTML/RTF), instead of inserting a near-duplicate
+
 ## [1.2.6](https://github.com/mecoren/EcoPaste/compare/v1.2.5...v1.2.6) (2026-09-17)
 
 ### ✨ Features
