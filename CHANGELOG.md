@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.2.9](https://github.com/mecoren/EcoPaste/compare/v1.2.8...v1.2.9) (2026-09-30)
+
+### ✨ Features
+
+* text entries in the clipboard list gain a hover "Edit Content" button that pops out with the other quick actions and opens the same editor as the context-menu entry and Ctrl+E
+* the "…" overflow menu now always offers a note entry above Delete ("Add Note" / "Edit Note" depending on whether the item already has one), and Delete is rendered in red like the context menu
+
+### 🐛 Bug Fixes
+
+* first keystroke after summoning the clipboard window on Windows only focused the search box without typing: the editing-focus watcher no longer drops the pending typeahead replay, and the replay ack timeout is relaxed to absorb the cold focus chain
+
 ## [1.2.8](https://github.com/mecoren/EcoPaste/compare/v1.2.7...v1.2.8) (2026-09-30)
 
 ### ✨ Features
