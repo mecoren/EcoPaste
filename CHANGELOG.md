@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.2.8](https://github.com/mecoren/EcoPaste/compare/v1.2.7...v1.2.8) (2026-09-30)
+
+### ✨ Features
+
+* pasting a history entry now moves it to the top (below pinned items) by default: "Update Record on Reuse" is enabled out of the box, flipped on once for existing installs via a settings-file migration, and can still be turned off in preferences
+
 ## [1.2.7](https://github.com/mecoren/EcoPaste/compare/v1.2.6...v1.2.7) (2026-09-29)
 
 ### 🐛 Bug Fixes
