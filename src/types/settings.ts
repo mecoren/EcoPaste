@@ -222,6 +222,8 @@ export interface Settings {
   clipboard: Clipboard;
   onboarding: Onboarding;
   update: Update;
+  /** 设置文件结构版本，由 Rust 端迁移逻辑维护，前端只读透传。 */
+  settingsVersion: number;
 }
 
 /**

@@ -16,7 +16,7 @@ use tauri::AppHandle;
 use crate::core::{AppError, Result};
 
 use super::model::{
-    Language, Settings, WINDOW_OPEN_GROUP_PREFIX, WINDOW_OPEN_SELECTION_ALL,
+    Language, Settings, SETTINGS_VERSION, WINDOW_OPEN_GROUP_PREFIX, WINDOW_OPEN_SELECTION_ALL,
     WINDOW_OPEN_SELECTION_PRESERVE,
 };
 
@@ -94,8 +94,11 @@ impl SettingsStore {
             .context("failed to serialize current settings for merge")?;
         deep_merge(&mut merged, patch);
 
-        let next: Settings = serde_json::from_value(merged)
+        // 内存里的设置恒为已迁移到当前版本的状态；patch 不允许回退文件版本号，
+        // 否则下一次加载会重复执行迁移、覆盖用户在 v1 之后改过的值。
+        let mut next: Settings = serde_json::from_value(merged)
             .map_err(|err| AppError::Other(anyhow::anyhow!("invalid settings patch: {err}")))?;
+        next.settings_version = SETTINGS_VERSION;
 
         validate_settings(&next)?;
 
@@ -106,12 +109,13 @@ impl SettingsStore {
         Ok(next)
     }
 
-    /// 用完整设置文件替换当前设置；覆盖导入专用。
+    /// 用完整设置文件替换当前设置；覆盖导入专用。旧版本文件先迁移再落盘。
     pub fn replace_from_file(&self, path: &Path) -> Result<Settings> {
         let content =
             fs::read_to_string(path).with_context(|| format!("failed to read {path:?}"))?;
-        let next: Settings = serde_json::from_str(&content)
+        let mut next: Settings = serde_json::from_str(&content)
             .map_err(|err| AppError::Other(anyhow::anyhow!("invalid settings file: {err}")))?;
+        migrate_settings(&mut next);
 
         validate_settings(&next)?;
 
@@ -163,21 +167,45 @@ fn default_settings_with_system_locale() -> Settings {
 /// 返回 `None` 表示主文件不存在（首次启动），调用方据此走「初始化默认」分支；
 /// 读取过程中遇到 IO/解析错误会打 warn，并返回 `Settings::default()` 包装在 `Some` 里——
 /// 这条路径表示「文件存在但坏了」，不要当成首次启动覆盖系统 locale。
+/// 解析成功后先跑版本迁移，有变更立即回写，保证迁移一次性完成不随进程反复触发。
 fn load_from_disk(path: &Path) -> Option<Settings> {
     if !path.exists() {
         return None;
     }
 
-    match fs::read_to_string(path).and_then(|content| {
+    let mut settings = match fs::read_to_string(path).and_then(|content| {
         serde_json::from_str::<Settings>(&content)
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
     }) {
-        Ok(settings) => Some(settings),
+        Ok(settings) => settings,
         Err(err) => {
             log::warn!("settings file {path:?} unreadable, using defaults: {err}");
-            Some(Settings::default())
+            return Some(Settings::default());
+        }
+    };
+
+    if migrate_settings(&mut settings) {
+        if let Err(err) = write_atomic(path, &settings) {
+            log::warn!("persist migrated settings failed: {err}");
         }
     }
+
+    Some(settings)
+}
+
+/// 把旧版本设置文件迁移到当前版本，返回是否发生变更（调用方需回写磁盘）。
+///
+/// v0 → v1：`updateOnReuse` 旧默认是 `false`，旧文件把旧默认值显式落了盘，
+/// 与用户主动关闭无法区分，故一次性统一翻正为 `true`（粘贴 / 复用后条目
+/// 按 `updated_at` 顶到置顶块之后的第一位）。v1 起用户再关闭不会被迁移覆盖。
+fn migrate_settings(settings: &mut Settings) -> bool {
+    if settings.settings_version >= SETTINGS_VERSION {
+        return false;
+    }
+
+    settings.clipboard.content.update_on_reuse = true;
+    settings.settings_version = SETTINGS_VERSION;
+    true
 }
 
 /// 写入策略：把新内容写到 tmp 后 rename 成主文件；rename 在同一文件系统下是原子的。
@@ -384,7 +412,10 @@ mod tests {
         assert!(parsed.clipboard.content.delete_favorite_confirm);
         assert!(!parsed.clipboard.content.delete_pinned_items);
         assert!(parsed.clipboard.content.delete_pinned_confirm);
-        assert!(!parsed.clipboard.content.update_on_reuse);
+        assert!(
+            parsed.clipboard.content.update_on_reuse,
+            "v1 起默认开启，复用后条目顶到第一位"
+        );
         assert_eq!(
             parsed.clipboard.content.merge_paste_separator,
             crate::settings::MergePasteSeparator::Newline
@@ -411,5 +442,64 @@ mod tests {
         settings.clipboard.window.select_group_on_open = "invalid".to_owned();
 
         assert!(validate_settings(&settings).is_err());
+    }
+
+    #[test]
+    fn fresh_settings_carry_current_version() {
+        let settings = Settings::default();
+        assert_eq!(settings.settings_version, SETTINGS_VERSION);
+    }
+
+    #[test]
+    fn migrate_settings_noop_for_current_version() {
+        let mut settings = Settings::default();
+        settings.clipboard.content.update_on_reuse = false;
+
+        assert!(!migrate_settings(&mut settings));
+        assert!(
+            !settings.clipboard.content.update_on_reuse,
+            "v1 之后用户主动关闭的值不被迁移覆盖"
+        );
+    }
+
+    #[test]
+    fn migration_flips_legacy_update_on_reuse_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILENAME);
+        fs::write(
+            &path,
+            r#"{"clipboard": {"content": {"updateOnReuse": false}}}"#,
+        )
+        .unwrap();
+
+        let settings = load_from_disk(&path).unwrap();
+        assert!(settings.clipboard.content.update_on_reuse);
+        assert_eq!(settings.settings_version, SETTINGS_VERSION);
+
+        // 迁移结果立即回写：二次加载读到的已是 v1 文件。
+        let raw: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw["settingsVersion"], 1);
+
+        fs::write(
+            &path,
+            r#"{"clipboard": {"content": {"updateOnReuse": false}}, "settingsVersion": 1}"#,
+        )
+        .unwrap();
+        let settings = load_from_disk(&path).unwrap();
+        assert!(
+            !settings.clipboard.content.update_on_reuse,
+            "v1 文件里显式的 false 是用户选择，保持不动"
+        );
+    }
+
+    #[test]
+    fn settings_patch_cannot_rewind_file_version() {
+        let (_dir, store) = store_for_version_test();
+        let next = store
+            .update(serde_json::json!({"settingsVersion": 0}))
+            .unwrap();
+
+        assert_eq!(next.settings_version, SETTINGS_VERSION);
     }
 }

@@ -10,7 +10,10 @@ pub const WINDOW_OPEN_SELECTION_PRESERVE: &str = "preserve";
 pub const WINDOW_OPEN_SELECTION_ALL: &str = "all";
 pub const WINDOW_OPEN_GROUP_PREFIX: &str = "group:";
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+/// 设置文件结构版本：旧版本文件由 `store::migrate_settings` 按需迁移后升级到此值。
+pub const SETTINGS_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
     pub general: General,
@@ -19,6 +22,25 @@ pub struct Settings {
     pub clipboard: Clipboard,
     pub onboarding: Onboarding,
     pub update: Update,
+    /// 落盘文件的结构版本；旧文件缺字段时按字段级默认回填为 0，触发加载期迁移。
+    /// 字段级 `#[serde(default)]` 必须保留：容器级 default 会取整体 `Settings::default()`
+    /// 的 1，导致旧文件永远到不了迁移分支。
+    #[serde(default)]
+    pub settings_version: u32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            general: General::default(),
+            appearance: Appearance::default(),
+            shortcuts: Shortcuts::default(),
+            clipboard: Clipboard::default(),
+            onboarding: Onboarding::default(),
+            update: Update::default(),
+            settings_version: SETTINGS_VERSION,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -353,6 +375,7 @@ pub struct Content {
     pub delete_favorite_items_only_in_favorite_group: bool,
     pub auto_favorite: bool,
     /// 从历史中复制 / 粘贴时，是否刷新使用次数与 `updated_at`。
+    /// v1 起默认开启：复用后条目按 `updated_at` 倒序顶到置顶块之后的第一位。
     pub update_on_reuse: bool,
     /// 历史列表默认排序，和 `ClipboardItemQuery.sort` 使用同一套契约字面量。
     pub sort: ClipboardItemSort,
@@ -381,7 +404,7 @@ impl Default for Content {
             delete_pinned_confirm: true,
             delete_favorite_items_only_in_favorite_group: true,
             auto_favorite: false,
-            update_on_reuse: false,
+            update_on_reuse: true,
             sort: ClipboardItemSort::UpdatedAt,
             merge_paste_separator: MergePasteSeparator::Newline,
             item_actions: vec![
