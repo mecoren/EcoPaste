@@ -1444,6 +1444,13 @@ const List: FC = () => {
       await pasteClipboardItem(item.id, false, transform);
     };
 
+    /**
+     * 悬浮「编辑内容」按钮入口：与右键菜单 / Ctrl+E 共用同一编辑流程。
+     */
+    const handleEditItem = () => {
+      handleOpenEdit(item, "quickActionEditContent");
+    };
+
     const handleQuickAction = async (action: ItemAction) => {
       if (action === "delete" && !canDeleteItem(item)) return;
 
@@ -1603,6 +1610,7 @@ const List: FC = () => {
           onAuxClick={handleAuxClick}
           onCleanupPaste={handleCleanupPaste}
           onDoubleClick={handleDoubleClick}
+          onEditContent={handleEditItem}
           onMouseDown={handleMouseDown}
           onOpenLink={handleOpenLink}
           onPointerEnter={handlePointerEnter}

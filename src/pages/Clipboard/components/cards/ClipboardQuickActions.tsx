@@ -9,6 +9,7 @@ import {
   filterAvailableItemActions,
   type ItemActionLabels,
   isCopyItemAction,
+  isItemActionAvailable,
   resolveItemActionPresentation,
 } from "@/constants/itemActions";
 import type { ClipboardItem, PasteTransform } from "@/types/clipboard";
@@ -21,6 +22,10 @@ const INLINE_ACTIONS_LIMIT = 3;
 interface ClipboardQuickActionsProps {
   item: ClipboardItem;
   labels?: ItemActionLabels;
+  /**
+   * 文本条目的「编辑内容」入口；非文本条目由按钮层自行隐藏。
+   */
+  onEditContent?: () => void;
   onCleanupPaste?: (transform: PasteTransform) => Promise<void> | void;
   onQuickAction?: (action: ItemAction) => Promise<void> | void;
   quickActions: ItemAction[];
@@ -40,18 +45,30 @@ interface QuickActionButtonProps {
 /**
  * 卡片 meta 右侧：未 hover 时快捷动作宽度归零且不带间距，时间戳贴在最右上角；
  * hover 时动作从右侧弹入，把时间戳顶向左侧并降为次级透明度。
- * 动作超过 [`INLINE_ACTIONS_LIMIT`] 个时前 3 个平铺、其余折叠进「…」菜单。
+ * 动作超过 [`INLINE_ACTIONS_LIMIT`] 个时前 3 个平铺、其余折叠进「…」菜单；
+ * 备注未配置进悬停动作时固定进「…」菜单首位；文本条目额外带固定的
+ * 「编辑内容」与「清理粘贴」按钮，均不参与用户配置。
  */
 const ClipboardQuickActions: FC<ClipboardQuickActionsProps> = (props) => {
-  const { item, labels, onCleanupPaste, onQuickAction, quickActions, visible } =
-    props;
+  const {
+    item,
+    labels,
+    onEditContent,
+    onCleanupPaste,
+    onQuickAction,
+    quickActions,
+    visible,
+  } = props;
   const shouldReduceMotion = useReducedMotion();
   const availableActions = filterAvailableItemActions(quickActions, item);
   const enabled =
     availableActions.length > 0 && Boolean(labels && onQuickAction);
+  const editAvailable =
+    item.kind === "text" && Boolean(labels && onQuickAction && onEditContent);
   const cleanupAvailable =
     item.kind === "text" && Boolean(labels && onQuickAction && onCleanupPaste);
-  const actionsVisible = visible && (enabled || cleanupAvailable);
+  const actionsVisible =
+    visible && (enabled || editAvailable || cleanupAvailable);
   const tabIndex = actionsVisible ? 0 : -1;
   const actionTransition = {
     duration: shouldReduceMotion ? 0 : 0.16,
@@ -59,6 +76,10 @@ const ClipboardQuickActions: FC<ClipboardQuickActionsProps> = (props) => {
   } as const;
   const inlineActions = availableActions.slice(0, INLINE_ACTIONS_LIMIT);
   const overflowActions = availableActions.slice(INLINE_ACTIONS_LIMIT);
+  // 备注未配置进悬停动作（默认配置即如此）时仍固定进「…」菜单：
+  // 删除之外唯一的折叠兜底动作，按可用性显隐。
+  const noteInOverflow =
+    !availableActions.includes("note") && isItemActionAvailable("note", item);
 
   return (
     <div className="flex h-6 min-w-0 shrink-0 items-center justify-end">
@@ -73,7 +94,9 @@ const ClipboardQuickActions: FC<ClipboardQuickActionsProps> = (props) => {
         {item.displayCreatedAt ?? item.createdAt}
       </span>
 
-      {labels && onQuickAction && (enabled || cleanupAvailable) ? (
+      {labels &&
+      onQuickAction &&
+      (enabled || editAvailable || cleanupAvailable) ? (
         <div
           aria-hidden={!actionsVisible}
           className={cn(
@@ -119,13 +142,22 @@ const ClipboardQuickActions: FC<ClipboardQuickActionsProps> = (props) => {
             })}
           </AnimatePresence>
 
-          {actionsVisible && overflowActions.length > 0 ? (
+          {editAvailable && onEditContent ? (
+            <EditContentButton
+              onEditContent={onEditContent}
+              tabIndex={tabIndex}
+            />
+          ) : null}
+
+          {actionsVisible && (overflowActions.length > 0 || noteInOverflow) ? (
             <OverflowActionsMenu
               actions={overflowActions}
+              hasNote={Boolean(item.note)}
               isFavorite={item.isFavorite}
               isPinned={item.isPinned}
               labels={labels}
               onQuickAction={onQuickAction}
+              prependNote={noteInOverflow}
             />
           ) : null}
 
@@ -143,25 +175,58 @@ const ClipboardQuickActions: FC<ClipboardQuickActionsProps> = (props) => {
 
 interface OverflowActionsMenuProps {
   actions: ItemAction[];
+  /** 条目是否已有备注：决定备注菜单项文案（添加 vs 编辑）。 */
+  hasNote: boolean;
   isFavorite: boolean;
   isPinned: boolean;
   labels: ItemActionLabels;
+  /** 备注未配置进悬停动作时固定插在菜单首位的入口。 */
+  prependNote: boolean;
   onQuickAction: (action: ItemAction) => Promise<void> | void;
 }
 
 /**
- * 折叠的溢出动作「…」菜单：antd Dropdown，菜单项复用动作的图标与文案。
+ * 折叠的溢出动作「…」菜单：antd Dropdown，菜单项复用动作的图标与文案；
+ * 危险动作（删除）以红色文字呈现，与右键菜单一致。
  */
 const OverflowActionsMenu: FC<OverflowActionsMenuProps> = (props) => {
-  const { actions, isFavorite, isPinned, labels, onQuickAction } = props;
+  const {
+    actions,
+    hasNote,
+    isFavorite,
+    isPinned,
+    labels,
+    onQuickAction,
+    prependNote,
+  } = props;
 
-  const menuItems = actions.map((action) => {
+  const noteMenuItems = prependNote
+    ? [
+        {
+          danger: false,
+          icon: (
+            <i
+              aria-hidden="true"
+              className={cn(
+                resolveItemActionPresentation("note", labels).icon,
+                "text-sm",
+              )}
+            />
+          ),
+          key: "note",
+          label: hasNote ? labels.editNote : labels.addNote,
+        },
+      ]
+    : [];
+
+  const actionMenuItems = actions.map((action) => {
     const presentation = resolveItemActionPresentation(action, labels, {
       isFavorite: action === "star" && isFavorite,
       isPinned: action === "pinItem" && isPinned,
     });
 
     return {
+      danger: presentation.danger,
       icon: (
         <i aria-hidden="true" className={cn(presentation.icon, "text-sm")} />
       ),
@@ -169,6 +234,8 @@ const OverflowActionsMenu: FC<OverflowActionsMenuProps> = (props) => {
       label: presentation.label,
     };
   });
+
+  const menuItems = [...noteMenuItems, ...actionMenuItems];
 
   return (
     <Dropdown
@@ -259,6 +326,49 @@ const CleanupPasteMenu: FC<CleanupPasteMenuProps> = (props) => {
         <i aria-hidden="true" className="i-lucide:eraser text-sm" />
       </button>
     </Dropdown>
+  );
+};
+
+interface EditContentButtonProps {
+  onEditContent: () => void;
+  tabIndex: 0 | -1;
+}
+
+/**
+ * 文本条目的「编辑内容」按钮：与右键菜单 / Ctrl+E 走同一编辑入口。
+ * 独立于用户可配置的悬停快捷动作，只按条目类型（文本）显隐。
+ */
+const EditContentButton: FC<EditContentButtonProps> = (props) => {
+  const { onEditContent, tabIndex } = props;
+  const { t } = useTranslation("clipboard");
+
+  const stopEditEvent = (event: SyntheticEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  const handleClick = (event: MouseEvent<HTMLButtonElement>) => {
+    stopEditEvent(event);
+    onEditContent();
+  };
+
+  return (
+    <Tooltip title={t("quickActions.editContent")}>
+      <button
+        aria-label={t("quickActions.editContent")}
+        className="flex size-5 items-center justify-center rounded-1.5 border-0 bg-transparent text-ant-secondary transition-colors hover:bg-ant-fill-tertiary hover:text-ant-text motion-reduce:transition-none"
+        onAuxClick={stopEditEvent}
+        onClick={handleClick}
+        onContextMenu={stopEditEvent}
+        onDoubleClick={stopEditEvent}
+        onMouseDown={stopEditEvent}
+        onPointerDown={stopEditEvent}
+        tabIndex={tabIndex}
+        type="button"
+      >
+        <i aria-hidden="true" className="i-lucide:pen-line text-sm" />
+      </button>
+    </Tooltip>
   );
 };
 

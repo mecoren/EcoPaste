@@ -15,11 +15,14 @@ interface ItemActionMeta {
 }
 
 export type ItemActionLabels = Record<ItemAction, string> & {
+  addNote: string;
   copySuccess: string;
   /** 溢出折叠「…」菜单的通用文案（clipbaord 命名空间 `quickActions.more`）。 */
   more: string;
   pinItemActive: string;
   starActive: string;
+  /** 条目已有备注时的溢出菜单文案（无备注用 addNote）。 */
+  editNote: string;
 };
 
 export interface ItemActionState {
@@ -156,7 +159,9 @@ export function buildItemActionLabels(t: ClipboardTranslator) {
 
   return {
     ...labels,
+    addNote: t("quickActions.addNote"),
     copySuccess: translateItemActionLabel(t, "copy", { copied: true }),
+    editNote: t("quickActions.editNote"),
     more: t("quickActions.moreActions"),
     pinItemActive: translateItemActionLabel(t, "pinItem", {
       isPinned: true,

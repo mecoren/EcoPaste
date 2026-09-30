@@ -98,10 +98,13 @@
     "title": "Edit note"
   },
   "quickActions": {
+    "addNote": "Add Note",
     "copy": "Copy",
     "copyPlain": "Copy as Plain Text",
     "copySuccess": "Copied",
     "delete": "Delete",
+    "editContent": "Edit Content",
+    "editNote": "Edit Note",
     "moreActions": "More actions",
     "note": "Note",
     "openLink": "Open Link",

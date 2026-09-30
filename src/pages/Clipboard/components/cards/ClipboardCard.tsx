@@ -46,6 +46,10 @@ interface ClipboardCardProps {
   quickActionLabels?: ItemActionLabels;
   onQuickAction?: (action: ItemAction) => Promise<void> | void;
   /**
+   * 文本条目的「编辑内容」入口；非文本条目由快捷动作层自行隐藏。
+   */
+  onEditContent?: () => void;
+  /**
    * 文本条目的「清理粘贴」变换入口；非文本条目由快捷动作层自行隐藏。
    */
   onCleanupPaste?: (transform: PasteTransform) => Promise<void> | void;
@@ -79,6 +83,7 @@ const ClipboardCard: FC<ClipboardCardProps> = (props) => {
     quickActions = [],
     quickActionLabels,
     onQuickAction,
+    onEditContent,
     onCleanupPaste,
     showOriginalOnHover = true,
     rootRef,
@@ -179,6 +184,7 @@ const ClipboardCard: FC<ClipboardCardProps> = (props) => {
           item={item}
           labels={quickActionLabels}
           onCleanupPaste={onCleanupPaste}
+          onEditContent={onEditContent}
           onQuickAction={onQuickAction}
           quickActions={quickActions}
           visible={hovered}
