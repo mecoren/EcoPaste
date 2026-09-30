@@ -519,6 +519,12 @@ focus pipeline, and the React type-ahead hook.
   immediately; it spawns a focus watcher that only disables the hooks once the
   clipboard window is actually foreground. This closes the "keys leak to the
   user's foreground app" window between set_focus dispatch and focus arrival.
+- When the watcher disables the hooks on focus arrival it MUST use
+  `disable_navigation_keys_on_edit_focus` and preserve the pending typeahead
+  queue + ack: the replay worker is waiting for exactly those conditions and
+  the window just became foreground. Clearing them eats the first keystroke
+  after summoning the window ("cursor focused but nothing typed"). Only the
+  hide path (`disable_navigation_keys`) drops pending replays.
 - `useClipboardWindowEditableFocus` must not restore editing on element
   `focusout` (handoff blur would otherwise give the foreground back mid-browse);
   restoration happens only on window blur (user leaves the app) or visibility
@@ -535,12 +541,16 @@ focus pipeline, and the React type-ahead hook.
 
 #### 4. Validation & Error Matrix
 
-- Frontend ack missing → replay dropped after 150ms; characters lost (user
-  re-types); no injection elsewhere.
+- Frontend ack missing → replay dropped after 400ms; characters lost (user
+  re-types); no injection elsewhere. The budget absorbs the cold chain right
+  after summoning (event → IPC → focus → ack IPC); the worker re-verifies the
+  foreground window before injecting, so a generous timeout never mis-injects.
 - Focus acquisition rejected by Windows → watcher rolls back `set_focusable`
   after 300ms and warns; hooks stay enabled.
-- `disable_navigation_keys` clears the queue and ack so late replays never
-  fire after hide.
+- `disable_navigation_keys` (hide path) clears the queue and ack so late
+  replays never fire after hide; `disable_navigation_keys_on_edit_focus`
+  (focus-acquired path) preserves them — locked by
+  `edit_focus_disable_preserves_pending_typeahead_state`.
 - Paste while editing (Windows): `paste_clipboard_item` exits editing before
   simulate so Ctrl+V reaches the user's app.
 

@@ -10,4 +10,7 @@ pub const NAV_EVENT: &str = "keyboard://nav";
 pub const SEARCH_TYPING_EVENT: &str = "clipboard://search-typing";
 
 mod windows;
-pub use windows::{ack_typeahead_focus, disable_navigation_keys, enable_navigation_keys};
+pub use windows::{
+    ack_typeahead_focus, disable_navigation_keys, disable_navigation_keys_on_edit_focus,
+    enable_navigation_keys,
+};

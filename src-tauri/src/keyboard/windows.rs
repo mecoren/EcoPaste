@@ -30,7 +30,9 @@ static TYPEAHEAD_WORKER_RUNNING: AtomicBool = AtomicBool::new(false);
 static TYPEAHEAD_QUEUE: Mutex<VecDeque<(u32, bool)>> = Mutex::new(VecDeque::new());
 
 /// 等前端 ack 的最长时间；超时视为焦点未达成，丢弃队列不注入。
-const TYPEAHEAD_ACK_TIMEOUT: Duration = Duration::from_millis(150);
+/// 冷启动路径（窗口刚唤出：事件 → IPC → 聚焦 → ack IPC）峰值会超过百毫秒，
+/// 给足余量避免首字符被误丢；回放线程注入前会再验前台，放宽不会误注入。
+const TYPEAHEAD_ACK_TIMEOUT: Duration = Duration::from_millis(400);
 /// 等剪贴板窗口成为前台的最长时间（set_focus 异步派发）。
 const TYPEAHEAD_FOREGROUND_TIMEOUT: Duration = Duration::from_millis(250);
 const TYPEAHEAD_POLL_INTERVAL: Duration = Duration::from_millis(5);
@@ -135,11 +137,14 @@ pub fn enable_navigation_keys(app: &AppHandle) {
     });
 }
 
-pub fn disable_navigation_keys() {
+/// 停钩子的公共内核：置位关闭、通知前端 Ctrl 已松开、退出钩子线程。
+/// 合成 Ctrl keyup 对隐藏与焦点交接两条路径都无害（真实 keyup 到达后幂等），
+/// 还能兜底 WebView 焦点切换瞬间真实 keyup 丢失导致的「Ctrl 按下」残留。
+fn stop_navigation_hook() {
     NAV_ENABLED.store(false, Ordering::Relaxed);
 
-    // 隐藏窗口时主动通知前端 Ctrl 已松开：隐藏后钩子线程随即退出，
-    // 此后真实的 Ctrl keyup 不会再被捕获，否则前端会残留"Ctrl 按下"状态。
+    // 钩子线程随即退出，此后真实的 Ctrl keyup 不会再被捕获，
+    // 主动通知前端松开，否则前端会残留"Ctrl 按下"状态。
     if let Some(app) = APP_HANDLE.get() {
         if let Err(err) = app.emit(
             NAV_EVENT,
@@ -149,13 +154,27 @@ pub fn disable_navigation_keys() {
         }
     }
 
-    // 迟到的回放绝不能触发：队列与 ack 一并复位（回放线程在注入前会再验前台）。
-    TYPEAHEAD_QUEUE
-        .lock()
-        .expect("typeahead queue poisoned")
-        .clear();
-    TYPEAHEAD_ACK.store(false, Ordering::Relaxed);
+    stop_hook_thread();
+}
 
+/// 隐藏窗口时停钩子，并丢弃待回放的 typeahead 状态：
+/// 迟到的回放绝不能触发（回放线程在注入前会再验前台，双保险）。
+pub fn disable_navigation_keys() {
+    stop_navigation_hook();
+    clear_typeahead_pending();
+}
+
+/// editing 焦点到位后停钩子，但保留待回放的 typeahead 状态。
+///
+/// 此刻回放线程正等着「前端 ack + 窗口成为前台」两个条件，而窗口恰好在
+/// 这次焦点交接中转为前台——清空队列或 ack 会把「唤出窗口后的第一键」
+/// 丢成只聚焦不输入。回放线程注入前自行校验前台窗口，钩子停了也不会
+/// 把字符注进别的应用。
+pub fn disable_navigation_keys_on_edit_focus() {
+    stop_navigation_hook();
+}
+
+fn stop_hook_thread() {
     let tid = HOOK_THREAD_ID
         .lock()
         .expect("hook thread id poisoned")
@@ -165,6 +184,14 @@ pub fn disable_navigation_keys() {
             PostThreadMessageW(tid, WM_QUIT, 0, 0);
         }
     }
+}
+
+fn clear_typeahead_pending() {
+    TYPEAHEAD_QUEUE
+        .lock()
+        .expect("typeahead queue poisoned")
+        .clear();
+    TYPEAHEAD_ACK.store(false, Ordering::Relaxed);
 }
 
 /// 前端聚焦搜索框后调用，解锁回放线程注入被吞的按键。
@@ -255,11 +282,7 @@ fn wait_for_condition(timeout: Duration, check: impl Fn() -> bool) -> bool {
 }
 
 fn clear_typeahead_worker_state() {
-    TYPEAHEAD_QUEUE
-        .lock()
-        .expect("typeahead queue poisoned")
-        .clear();
-    TYPEAHEAD_ACK.store(false, Ordering::Relaxed);
+    clear_typeahead_pending();
     TYPEAHEAD_WORKER_RUNNING.store(false, Ordering::SeqCst);
 }
 
@@ -428,11 +451,61 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
 
 #[cfg(test)]
 mod tests {
-    use super::{ctrl_shortcut_key, typeahead_key};
+    use std::sync::atomic::Ordering;
+
+    use super::{
+        ctrl_shortcut_key, disable_navigation_keys, disable_navigation_keys_on_edit_focus,
+        typeahead_key, TYPEAHEAD_ACK, TYPEAHEAD_QUEUE, TYPEAHEAD_WORKER_RUNNING,
+    };
     use winapi::um::winuser::{
         VK_BACK, VK_CONTROL, VK_DOWN, VK_LEFT, VK_MENU, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE,
         VK_TAB, VK_UP,
     };
+
+    /// 把三个 typeahead 静态位复原到干净态，避免与其它测试共享进程状态互相污染。
+    fn reset_typeahead_state() {
+        TYPEAHEAD_QUEUE
+            .lock()
+            .expect("typeahead queue poisoned")
+            .clear();
+        TYPEAHEAD_ACK.store(false, Ordering::Relaxed);
+        TYPEAHEAD_WORKER_RUNNING.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn edit_focus_disable_preserves_pending_typeahead_state() {
+        reset_typeahead_state();
+        TYPEAHEAD_ACK.store(true, Ordering::Relaxed);
+        TYPEAHEAD_QUEUE
+            .lock()
+            .expect("typeahead queue poisoned")
+            .push_back((0x41, false));
+
+        // editing 焦点到位只停钩子：回放线程正等这枚被吞的首字符，
+        // 队列与 ack 必须原样保留（契约见 run_typeahead_worker）。
+        disable_navigation_keys_on_edit_focus();
+
+        assert!(TYPEAHEAD_ACK.load(Ordering::Relaxed));
+        assert_eq!(
+            TYPEAHEAD_QUEUE
+                .lock()
+                .expect("typeahead queue poisoned")
+                .len(),
+            1
+        );
+
+        // 隐藏窗口路径才整体丢弃：迟到的回放绝不能触发。
+        disable_navigation_keys();
+
+        assert!(!TYPEAHEAD_ACK.load(Ordering::Relaxed));
+        assert!(TYPEAHEAD_QUEUE
+            .lock()
+            .expect("typeahead queue poisoned")
+            .is_empty());
+        assert!(!TYPEAHEAD_WORKER_RUNNING.load(Ordering::Relaxed));
+
+        reset_typeahead_state();
+    }
 
     #[test]
     fn ctrl_shortcut_key_whitelists_frontend_shortcuts_only() {

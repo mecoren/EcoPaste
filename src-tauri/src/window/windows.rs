@@ -105,7 +105,9 @@ fn spawn_editing_focus_watcher(app_handle: &AppHandle) {
             let foreground_matches = unsafe { GetForegroundWindow() == hwnd };
 
             if foreground_matches {
-                keyboard::disable_navigation_keys();
+                // 只停钩子、保留待回放状态：回放线程正等这枚被吞的首字符
+                // （ack + 前台），此刻窗口恰好转为前台，清空会丢首键。
+                keyboard::disable_navigation_keys_on_edit_focus();
                 EDITING_FOCUS_WATCHER_RUNNING.store(false, Ordering::SeqCst);
                 return;
             }
