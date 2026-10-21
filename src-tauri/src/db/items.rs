@@ -779,6 +779,21 @@ fn escape_like(keyword: &str) -> String {
     out
 }
 
+/// 返回排序子句里 `is_pinned DESC` 之后的列表达式，与 `migrations/0006` 的三条
+/// 排序索引一一对应：列顺序与方向必须完全一致，否则规划器退回全表扫描 + 临时排序。
+/// 抽成函数供生产查询与索引计划测试共用，避免两处字面量漂移。
+fn sort_order_clause(sort: ClipboardItemSort) -> &'static str {
+    match sort {
+        ClipboardItemSort::CreatedAt => "clipboard_items.created_at DESC",
+        ClipboardItemSort::UpdatedAt => {
+            "clipboard_items.updated_at DESC, clipboard_items.created_at DESC"
+        }
+        ClipboardItemSort::UseCount => {
+            "clipboard_items.use_count DESC, clipboard_items.created_at DESC"
+        }
+    }
+}
+
 /// 拼装查询：过滤（含可选关键词匹配） + 排序（置顶恒前置） + 分页。
 /// 所有 bind 均传入拥有所有权/Copy 的值，避免 `QueryBuilder` 借用 `q` 引发的生命周期问题。
 async fn fetch_items(
@@ -790,18 +805,8 @@ async fn fetch_items(
     qb.push(" WHERE 1 = 1");
     push_filter_clauses(&mut qb, q, &keyword);
 
-    qb.push(" ORDER BY clipboard_items.is_pinned DESC, ");
-    match q.sort {
-        ClipboardItemSort::CreatedAt => {
-            qb.push("clipboard_items.created_at DESC");
-        }
-        ClipboardItemSort::UpdatedAt => {
-            qb.push("clipboard_items.updated_at DESC, clipboard_items.created_at DESC");
-        }
-        ClipboardItemSort::UseCount => {
-            qb.push("clipboard_items.use_count DESC, clipboard_items.created_at DESC");
-        }
-    }
+    qb.push(" ORDER BY clipboard_items.is_pinned DESC, ")
+        .push(sort_order_clause(q.sort));
 
     qb.push(" LIMIT ").push_bind(q.limit);
     qb.push(" OFFSET ").push_bind(q.offset);
@@ -1482,6 +1487,97 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(ids(&by_use), ["b", "a", "c"]);
+    }
+
+    /// 列表排序必须走 `migrations/0006` 的排序索引，不能退回全表扫描 + 临时排序。
+    ///
+    /// 这条断言锁住的是「数据越多、打开剪贴板窗口越慢」那个回归：混合方向索引
+    /// （0002 的 `is_pinned` 升序 + 排序列降序）满足不了全 DESC 排序，规划器会退成
+    /// `SCAN` + `USE TEMP B-TREE FOR ORDER BY`，排序要读出每一行。测试用生产同一份
+    /// [`LIST_SELECT_ITEM`] + [`sort_order_clause`] 拼 SQL，避免与真实查询漂移。
+    #[tokio::test]
+    async fn list_query_uses_sort_index_without_temp_btree() {
+        let pool = memory_pool().await;
+
+        for sort in [
+            ClipboardItemSort::UpdatedAt,
+            ClipboardItemSort::CreatedAt,
+            ClipboardItemSort::UseCount,
+        ] {
+            let sql = format!(
+                "EXPLAIN QUERY PLAN {LIST_SELECT_ITEM} WHERE 1 = 1 \
+                 ORDER BY clipboard_items.is_pinned DESC, {} LIMIT 30 OFFSET 0",
+                sort_order_clause(sort)
+            );
+
+            let rows: Vec<(i64, i64, i64, String)> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+            let plan = rows
+                .iter()
+                .map(|row| row.3.as_str())
+                .collect::<Vec<_>>()
+                .join(" | ");
+
+            // 断言必须点名排序索引：LEFT JOIN 的 `sqlite_autoindex_clipboard_apps_1`
+            // 也会让 plan 含 `USING INDEX`，只查这个子串会漏掉主表全表扫描。
+            let expected_index = match sort {
+                ClipboardItemSort::UpdatedAt => "idx_clipboard_items_pinned_updated_created",
+                ClipboardItemSort::CreatedAt => "idx_clipboard_items_pinned_created",
+                ClipboardItemSort::UseCount => "idx_clipboard_items_pinned_use_created",
+            };
+
+            assert!(
+                plan.contains(expected_index),
+                "list sort {sort:?} must scan {expected_index}, plan: {plan}"
+            );
+            assert!(
+                !plan.contains("TEMP B-TREE"),
+                "list sort {sort:?} must not sort into a temp b-tree, plan: {plan}"
+            );
+        }
+    }
+
+    /// 锁定 `sqlx::migrate!("./migrations")` 实际嵌入的迁移集：0006 必须作为
+    /// version 6 被识别并成功执行，且 0002 的混合方向索引已被它替换。
+    ///
+    /// 这条断言覆盖的是「编译期宏有没有认到新迁移文件」——手工用 sqlite3 跑 SQL
+    /// 验证不到这一层：文件名解析、事务包装、checksum 落库都由宏与 migrator 负责。
+    #[tokio::test]
+    async fn migrations_embed_list_sort_index_replacement() {
+        let pool = memory_pool().await;
+
+        let applied: Option<(String, bool)> =
+            sqlx::query_as("SELECT description, success FROM _sqlx_migrations WHERE version = 6")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        let (description, success) =
+            applied.expect("migration 6 must be embedded by sqlx::migrate!");
+        assert_eq!(description, "clipboard list sort indexes");
+        assert!(success, "migration 6 must have applied successfully");
+
+        let indexes: Vec<(String,)> = sqlx::query_as(
+            "SELECT name FROM sqlite_master \
+             WHERE type = 'index' AND tbl_name = 'clipboard_items' \
+               AND name LIKE 'idx_clipboard_items_pinned_%' \
+             ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let names: Vec<&str> = indexes.iter().map(|row| row.0.as_str()).collect();
+
+        assert_eq!(
+            names,
+            [
+                "idx_clipboard_items_pinned_created",
+                "idx_clipboard_items_pinned_updated_created",
+                "idx_clipboard_items_pinned_use_created",
+            ],
+            "0006 must replace the 0002 mixed-direction indexes with all-DESC ones"
+        );
     }
 
     #[tokio::test]
