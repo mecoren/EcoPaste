@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.3.0](https://github.com/mecoren/EcoPaste/compare/v1.2.9...v1.3.0) (2026-10-21)
+
+### 🐛 Bug Fixes
+
+* opening the clipboard window no longer stalls as history grows: the list sort had no usable index, so every open scanned the whole history table and sorted it in a temporary b-tree; all-DESC composite indexes now cover the pinned-first ordering for every sort mode, and the query cost no longer scales with row count
+
 ## [1.2.9](https://github.com/mecoren/EcoPaste/compare/v1.2.8...v1.2.9) (2026-09-30)
 
 ### ✨ Features
