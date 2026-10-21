@@ -97,11 +97,27 @@ cargo test
 - 数据库使用 Tauri `State<SqlitePool>`；不要每次新建连接。
 - Cargo 依赖版本不要写 patch 级完整版本；所有依赖优先写主版本号，如 `"2"`，确需收窄时最多写到 minor，如 `"0.9"`，除非有明确锁定原因。
 - SQL 用 `sqlx::query` / `query_as`，不用 `query!` 宏，避免维护离线缓存。
-- 已发布版本的 schema 变更必须新增 migration；已发布 migration 不回改。
+- 已发布版本的 schema 变更必须新增 migration；已发布 migration 不回改（原因与恢复路径见下）。
 - 改 schema 时同步检查所有 `SELECT`、`INSERT`、`UPDATE`、`bind`、测试结构体字面量；`query_as` 字段不匹配可能表现为 UI 空结果。
 - 表必须有 `created_at` / `updated_at`，类型 `TEXT NOT NULL`；剪贴板 `updated_at` 表示内容重新使用时间，收藏、置顶、备注等元数据更新不要刷新它。
 - `commands/` 保持薄层：参数校验 + 调用下层模块，不写业务逻辑。
 - 平台代码用 `#[cfg(target_os = "macos")]` / `#[cfg(target_os = "windows")]` 隔离；新增能力两端同步实现，或显式标注 TODO。
+
+### 已发布 migration 不可变
+
+sqlx 对每个 migration 文件内容算 `Sha384` 校验和，落进 `_sqlx_migrations.checksum`。已发布后再改该文件一个字符，升级过的用户启动时 `validate_applied_migrations` 会返回 `VersionMismatch`，迁移失败 → `db::init` 报错 → `lib.rs` 的 `.expect` 直接终止进程。**用户看到的是「点了图标没反应」**，不是可读的错误提示。
+
+同一机制还决定了两条不可逆行为：
+
+- **不能回退版本自救**：旧二进制里没有该 version 的 migration，同样会因 `VersionMissing` 拒绝启动。所以 0006 一旦发出，用户装回旧版也起不来。
+- **不能删除已发布 migration 文件**：等价于上一条。
+
+因此：
+
+- 要修正已发布的 migration，**只能新开一个更高编号的 migration**（如 `0007_xxx.sql`）去覆盖，绝不回改 0006。
+- 迁移在 `db::init` 中**启动期阻塞执行**，失败即启动失败；涉及大表的 DDL 要评估耗时（实测：60 MB 库 107 ms、450 MB 库约 1 s、880 MB 库约 1.9 s）。
+- 提交前必须让应用真实启动过一次，并确认 `_sqlx_migrations` 里该 version `success = 1`；只用手工 `sqlite3` 跑过 SQL 不算验证——`sqlx::migrate!` 是编译期宏，文件名解析、事务包装、checksum 记录都由它负责。
+- **增删迁移文件后要 `cargo clean -p EcoPaste`**：cargo 不跟踪 `migrations/` 目录内容变化，只按文件名 mtime 判断，删掉再恢复同名文件会命中旧缓存，测试仍跑旧的迁移集（表现为「迁移明明在，测试却说没有」）。
 
 ## 前端约定
 
