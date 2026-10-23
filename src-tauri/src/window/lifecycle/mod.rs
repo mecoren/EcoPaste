@@ -8,6 +8,10 @@
 //! 启动空闲计时器，超过用户设置的空闲秒数仍隐藏则销毁 WebView 释放资源；再次打开时
 //! 经 descriptor 的 `build` 重建（preference 走 `show_window`，preview 走预览模块按需 ensure
 //! 建窗）。`generation` 用于让「显示又隐藏」期间的过期计时器自动失效。
+//!
+//! 剪贴板主窗口默认 `Permanent` 保活，只在 `idle_destroy_main` 档位开启时参与销毁。
+//! 销毁全部窗口会让 Tauri 在最后一个窗口的 `Destroyed` 上合成 `ExitRequested`，
+//! 故 `lib.rs` 对无 `code` 的退出请求统一 `prevent_exit`——托盘常驻应用不因窗口归零退出。
 
 mod descriptor;
 
@@ -232,32 +236,20 @@ impl WindowLifecycleManager {
             "window lifecycle: {label} {previous:?} -> {phase:?} (gen {generation}, reason {reason})"
         );
 
-        // 首次进入 HiddenWarm 的 DestroyWhenIdle 窗口：启动空闲销毁计时器。
+        // 首次进入 HiddenWarm：按保留策略挂销毁计时器或 dormant 冻结。
         // 重复进入 HiddenWarm（如剪贴板窗口隐藏时对已收起的预览窗口再次 hide）不再补计时器：
         // 每代次只需首次进入时启动的那一条，到点按代次校验决定销毁或放弃，
         // 重复启动只会堆积休眠线程。
-        if matches!(phase, LifecyclePhase::HiddenWarm)
-            && previous != LifecyclePhase::HiddenWarm
-            && descriptor.retain_policy == RetainPolicy::DestroyWhenIdle
-            && lightweight_mode_enabled(app)
-        {
-            schedule_idle_destroy(app, label, generation, idle_destroy_secs(app));
-        }
-
-        // 剪贴板主窗口：`idle_destroy_main` 开启时同样参与空闲销毁（否则只走 dormant 冻结）。
-        // 二者互斥——同一计时周期只挂销毁计时器，dormant 冻结对「即将销毁」的窗口没有意义。
-        let clipboard_idle_destroy = matches!(phase, LifecyclePhase::HiddenWarm)
-            && previous != LifecyclePhase::HiddenWarm
-            && label == super::CLIPBOARD_WINDOW_LABEL
-            && idle_destroy_main_enabled(app);
-        if clipboard_idle_destroy {
-            schedule_idle_destroy(app, label, generation, idle_destroy_secs(app));
-        } else if matches!(phase, LifecyclePhase::HiddenWarm)
-            && previous != LifecyclePhase::HiddenWarm
-            && label == super::CLIPBOARD_WINDOW_LABEL
-            && lightweight_mode_enabled(app)
-        {
-            schedule_clipboard_dormant(app, label, generation);
+        //
+        // 两个分支用同一个 `destroy_allowed` 判定，避免「挂上计时器却永远不放行销毁」的
+        // 空转：剪贴板主窗口的 `idle_destroy_main` 是轻量模式的子项，轻量模式关掉时
+        // 该档位同样失效。
+        if matches!(phase, LifecyclePhase::HiddenWarm) && previous != LifecyclePhase::HiddenWarm {
+            if destroy_allowed(app, label) {
+                schedule_idle_destroy(app, label, generation, idle_destroy_secs(app));
+            } else if label == super::CLIPBOARD_WINDOW_LABEL && lightweight_mode_enabled(app) {
+                schedule_clipboard_dormant(app, label, generation);
+            }
         }
 
         if !descriptor.emits_lifecycle {
@@ -548,14 +540,8 @@ fn schedule_idle_destroy(app: &AppHandle, label: &str, generation: u64, timeout_
 /// 主窗口 `idle_destroy_main` 开启时先经 dormant 冻结，两阶段都允许销毁）才进入
 /// DestroyPending，否则说明窗口已被重新显示或已销毁，放弃本次销毁。
 fn try_destroy_idle(app: &AppHandle, label: &str, generation: u64) {
-    // DestroyWhenIdle 窗口看轻量模式；剪贴板主窗口看 `idle_destroy_main` 可选档——
     // 计时器挂起期间用户关掉开关时，到点不得再销毁。
-    let destroy_allowed = if label == super::CLIPBOARD_WINDOW_LABEL {
-        idle_destroy_main_enabled(app)
-    } else {
-        lightweight_mode_enabled(app)
-    };
-    if !destroy_allowed {
+    if !destroy_allowed(app, label) {
         return;
     }
 
@@ -630,7 +616,7 @@ fn schedule_destroy_after_deadline(app: &AppHandle, label: &str, generation: u64
 
 /// 最终销毁判定：仍处于 DestroyPending、代次未变且没有 dirty / keepalive 才释放 WebView。
 fn finish_destroy_idle(app: &AppHandle, label: &str, generation: u64) {
-    if !lightweight_mode_enabled(app) {
+    if !destroy_allowed(app, label) {
         return;
     }
 
@@ -694,6 +680,46 @@ fn finish_destroy_idle(app: &AppHandle, label: &str, generation: u64) {
     }
 
     manager.transition(app, label, LifecyclePhase::Destroyed, "idle-destroy");
+}
+
+/// 该窗口当前是否允许空闲销毁。
+///
+/// `DestroyWhenIdle` 窗口看轻量模式；剪贴板主窗口看 `idle_destroy_main` 可选档，
+/// 但该档位在 UI 上挂在轻量模式之下（轻量模式关闭时禁用），所以两者必须同时满足。
+/// 挂计时器、到点判定、最终销毁三处共用这一条，杜绝「计时器挂了却被别的开关拦下」。
+fn destroy_allowed(app: &AppHandle, label: &str) -> bool {
+    let destroy_when_idle =
+        descriptor_for(label).is_some_and(|d| d.retain_policy == RetainPolicy::DestroyWhenIdle);
+
+    destroy_allowed_for(
+        label,
+        destroy_when_idle,
+        lightweight_mode_enabled(app),
+        idle_destroy_main_enabled(app),
+    )
+}
+
+/// [`destroy_allowed`] 的纯判定部分：保留策略由调用方查表后传入。
+///
+/// 不在这里查 descriptor 是有意为之——单测引用本函数时，若经由它触达 [`descriptor_for`]，
+/// 整个 [`DESCRIPTORS`] 表会连同各窗口的 build 函数一起被链接进测试二进制，牵入 tao 的
+/// Windows 菜单 / 任务对话框代码（`TaskDialogIndirect`），而系统 comctl32 是 v5 侧载前
+/// 的 5.82、没有该导出，测试进程会在加载阶段以 `STATUS_ENTRYPOINT_NOT_FOUND` 直接退出。
+fn destroy_allowed_for(
+    label: &str,
+    destroy_when_idle: bool,
+    lightweight_mode: bool,
+    idle_destroy_main: bool,
+) -> bool {
+    if !lightweight_mode {
+        return false;
+    }
+
+    if label == super::CLIPBOARD_WINDOW_LABEL {
+        return idle_destroy_main;
+    }
+
+    destroy_when_idle
 }
 
 /// 当前是否启用轻量模式。设置缺失时默认启用，匹配 `Settings::default()`。
@@ -826,5 +852,32 @@ mod tests {
         state.phase = LifecyclePhase::Destroyed;
 
         assert_eq!(snapshot_phase(&state, false), LifecyclePhase::Destroyed);
+    }
+
+    /// 空闲销毁开关矩阵：挂计时器、到点判定、最终销毁三处共用同一判定，
+    /// 不允许出现「计时器挂上了但永远不放行」的空转组合。
+    #[test]
+    fn destroy_allowed_covers_lightweight_and_main_toggle_matrix() {
+        let clipboard = super::super::CLIPBOARD_WINDOW_LABEL;
+        let preference = super::super::PREFERENCE_WINDOW_LABEL;
+
+        // 轻量模式关掉时一切空闲销毁失效（`idle_destroy_main` 是它的子项）。
+        assert!(!destroy_allowed_for(clipboard, false, false, true));
+        assert!(!destroy_allowed_for(clipboard, false, false, false));
+        assert!(!destroy_allowed_for(preference, true, false, true));
+
+        // 轻量模式开着：主窗口只看自身档位，其余窗口看保留策略。
+        assert!(destroy_allowed_for(clipboard, false, true, true));
+        assert!(!destroy_allowed_for(clipboard, false, true, false));
+        assert!(destroy_allowed_for(preference, true, true, false));
+        // 主窗口即便被标成 DestroyWhenIdle 也仍以 `idle_destroy_main` 为准。
+        assert!(!destroy_allowed_for(clipboard, true, true, false));
+    }
+
+    /// 未在 descriptor 登记的 label（保留策略为 false）一律不参与空闲销毁，
+    /// 避免脏 label 挂出计时器。
+    #[test]
+    fn destroy_allowed_rejects_unknown_labels() {
+        assert!(!destroy_allowed_for("not-a-window", false, true, true));
     }
 }

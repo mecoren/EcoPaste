@@ -346,13 +346,32 @@ pub fn run() {
                 }
             }
 
-            // 退出前保存所有窗口几何，兜住「调整大小后不关窗直接退出」的场景；
-            // 开启「退出时清空历史」时同步清库删图（复用 clear 语义，含图片落盘文件）。
-            if let tauri::RunEvent::ExitRequested { .. } = event {
-                window::save_all_window_states(app_handle);
-                clear_history_on_exit(app_handle);
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = &event {
+                if should_prevent_exit(*code) {
+                    // 托盘常驻应用：窗口数归零不是退出意图。`idle_destroy_main` 打开后
+                    // 剪贴板主窗口自己也会被空闲销毁，此时 Tauri 会在最后一个窗口的
+                    // `Destroyed` 上合成 `ExitRequested { code: None }`，不拦就会连进程一起退出。
+                    log::info!("exit requested without code (no windows left), kept alive");
+                    api.prevent_exit();
+                } else {
+                    // 只有真正退出才收尾：窗口数归零时跑 `clear_history_on_exit`
+                    // 会让开启「退出时清空历史」的用户直接丢历史。
+                    window::save_all_window_states(app_handle);
+                    clear_history_on_exit(app_handle);
+                }
             }
         });
+}
+
+/// `ExitRequested` 是否应当被拦截。
+///
+/// Tauri 只在程序自己调 `AppHandle::exit` / `request_restart` 时给 `code`；
+/// `None` 全部来自「最后一个窗口被销毁」，对托盘常驻应用而言不是退出意图。
+///
+/// macOS 的 ⌘Q 与 Dock 退出不经这个事件（tao 直接走 `applicationWillTerminate`
+/// → `RunEvent::Exit`，该事件没有拦截 API），所以这里的拦截不会让 macOS 退不掉。
+fn should_prevent_exit(code: Option<i32>) -> bool {
+    code.is_none()
 }
 
 /// 「退出时清空历史」钩子：同步执行（退出路径没有并发任务争抢），失败仅记日志
@@ -391,4 +410,18 @@ fn show_default_foreground_window(app_handle: &tauri::AppHandle) -> core::Result
     }
 
     window::show_window(app_handle, window::PREFERENCE_WINDOW_LABEL)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 无 `code` 的退出请求只来自「最后一个窗口被销毁」，托盘应用必须拦下；
+    /// 带 `code` 的是 `AppHandle::exit` / `request_restart`，必须放行。
+    #[test]
+    fn exit_without_code_is_prevented_but_programmatic_exit_is_not() {
+        assert!(should_prevent_exit(None));
+        assert!(!should_prevent_exit(Some(0)));
+        assert!(!should_prevent_exit(Some(tauri::RESTART_EXIT_CODE)));
+    }
 }
