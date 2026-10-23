@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.1](https://github.com/mecoren/EcoPaste/compare/v1.3.0...v1.3.1) (2026-10-23)
+
+### 🐛 Bug Fixes
+
+* enabling "Release main window when idle" quit the whole app instead of freeing memory: destroying the last window makes Tauri request an exit, and nothing prevented it, so the background clipboard watcher died with the window; exit requests that carry no exit code are now declined, while explicit quits and update restarts still proceed
+* "Clear history on exit" could wipe the database without actually quitting: the hook ran for every exit request, including the one synthesized when the last window is destroyed; it now runs only for real quits
+* "Release main window when idle" could arm a timer that never fired: the idle-destroy decision was spread across three call sites with different switch combinations, so light mode off plus the main-window switch on left a timer running that no code path would act on; all three now share one decision
+
 ## [1.3.0](https://github.com/mecoren/EcoPaste/compare/v1.2.9...v1.3.0) (2026-10-21)
 
 ### 🐛 Bug Fixes
